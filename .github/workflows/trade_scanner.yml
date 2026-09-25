@@ -73,6 +73,8 @@ jobs:
 
       - name: Execute Autonomous AI Market Scan
         env:
+          PYTHONIOENCODING: "utf-8"
+          PYTHONUTF8: "1"
           MT5_LOGIN: ${{ secrets.MT5_LOGIN }}
           MT5_PASSWORD: ${{ secrets.MT5_PASSWORD }}
           MT5_SERVER: ${{ secrets.MT5_SERVER }}

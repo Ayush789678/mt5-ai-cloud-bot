@@ -5,9 +5,15 @@ Directly connects to MT5 demo account, scans live market, runs AI inference,
 places orders with TP/SL pre-set, and alerts Telegram!
 """
 
-import os, sys, time, datetime, json
+import os, sys, time, datetime, json, io
 import numpy as np
 import pandas as pd
+
+# Force UTF-8 encoding for Windows GitHub runner console
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+if hasattr(sys.stderr, 'reconfigure'):
+    sys.stderr.reconfigure(encoding='utf-8', errors='replace')
 
 from telegram_bot import TelegramNotifier
 
@@ -153,7 +159,7 @@ def run_scanner():
         mt5.shutdown()
         sys.exit(1)
         
-    print(f"✓ Connected to #{acc.login} ({acc.server}) | Balance: ${acc.balance:.2f} | Equity: ${acc.equity:.2f}")
+    print(f"[OK] Connected to #{acc.login} ({acc.server}) | Balance: ${acc.balance:.2f} | Equity: ${acc.equity:.2f}")
     
     # 5. Check Open Positions & Circuit Breakers
     positions = mt5.positions_get()
@@ -169,7 +175,7 @@ def run_scanner():
     from trading_bot_engine import UnifiedTradingBotEngine
     print("Loading Golden DoubleEnsemble model bundle...")
     engine = UnifiedTradingBotEngine(os.path.dirname(os.path.abspath(__file__)))
-    print(f"✓ AI Engine online with {len(engine.feature_cols)} feature inputs.")
+    print(f"[OK] AI Engine online with {len(engine.feature_cols)} feature inputs.")
     
     # Map timeframe strings to MT5 constants
     tf_map = {
@@ -236,7 +242,7 @@ def run_scanner():
                         "u_epi": u_epi,
                         "conviction": conviction
                     })
-                    print(f"  ★ [{pair} {tf_label}] SIGNAL DETECTED: BUY @ {current_price:.5f} | Win Prob: {p_win*100:.1f}% | Conv: {conviction:.3f}")
+                    print(f"  [*] [{pair} {tf_label}] SIGNAL DETECTED: BUY @ {current_price:.5f} | Win Prob: {p_win*100:.1f}% | Conv: {conviction:.3f}")
             except Exception as e:
                 print(f"[{pair} {tf_label}] Feature extraction error: {e}")
                 continue
@@ -287,7 +293,7 @@ def run_scanner():
         print(f"\n[EXECUTING ORDER] {action} {lot_size} lots of {pair} @ {price:.5f} | TP: {tp:.5f} | SL: {sl:.5f}")
         result = mt5.order_send(request)
         if result and result.retcode == mt5.TRADE_RETCODE_DONE:
-            print(f"🎉 ORDER EXECUTED! Deal ID: #{result.deal}")
+            print(f"[SUCCESS] ORDER EXECUTED! Deal ID: #{result.deal}")
             notifier.notify_trade_opened(
                 pair=pair, action=action, tf=tf, price=price,
                 lot_size=lot_size, tp=tp, sl=sl, p_win=p_win,
