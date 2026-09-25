@@ -1,27 +1,26 @@
 @echo off
-title MT5 AI Bridge Connector
+title MT5 Real-Time 1-Second AI Trading Bot
 cd /d "%~dp0"
 
-echo =======================================================
-echo          STARTING LOCAL MT5 AI CONNECTOR
-echo =======================================================
+echo ======================================================================
+echo          REAL-TIME 1-SECOND QUANTITATIVE MT5 AI TRADING BOT
+echo ======================================================================
+echo Target MT5 Account : #12345868444 (Elefin-Trade)
+echo Active Symbols     : EURUSD, GBPUSD, USDJPY, AUDUSD, USDCAD, USDCHF, NZDUSD, XAUUSD
+echo Scan Frequency     : EVERY 1.0 SECOND (Zero-Lag Local RAM Inference)
+echo Daily Profit Goal  : $10.00 - $15.00 (Max 5 Trades/Day)
+echo ======================================================================
 echo.
 
 if not exist ".venv\Scripts\python.exe" (
     echo [ERROR] Virtual environment .venv not found!
-    echo Please create it first using: py -3.11 -m venv .venv
     pause
     exit /b 1
 )
 
-:: Prompt for Render URL or use default
-set /p RENDER_URL="Enter Render Server URL [Press Enter for default https://mt5-ai-model-service.onrender.com]: "
-if "%RENDER_URL%"=="" set RENDER_URL=https://mt5-ai-model-service.onrender.com
-
-echo.
-echo Connecting to AI Cloud at: %RENDER_URL%
+echo [ACTIVE] Connecting to MT5 and starting 1-second live decision engine...
 echo.
 
-.\.venv\Scripts\python.exe mt5_local_connector.py --url %RENDER_URL% --interval 15
+.\.venv\Scripts\python.exe mt5_local_connector.py
 
 pause
