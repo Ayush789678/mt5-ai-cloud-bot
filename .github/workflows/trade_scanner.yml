@@ -53,13 +53,13 @@ jobs:
           
           # Write startup config to automatically log into broker and bypass modal wizard
           $configPath = "C:\mt5_config.ini"
-          $configContent = @"
-[Common]
-Login=$($env:MT5_LOGIN)
-Password=$($env:MT5_PASSWORD)
-Server=$($env:MT5_SERVER)
-"@
-          Set-Content -Path $configPath -Value $configContent
+          $lines = @(
+            "[Common]",
+            "Login=$($env:MT5_LOGIN)",
+            "Password=$($env:MT5_PASSWORD)",
+            "Server=$($env:MT5_SERVER)"
+          )
+          $lines | Set-Content -Path $configPath
           Write-Host "MT5 configuration generated at $configPath"
           
           Write-Host "Pre-launching MT5 terminal with broker config..."
