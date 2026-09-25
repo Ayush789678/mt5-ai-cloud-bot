@@ -30,50 +30,42 @@ jobs:
           pip install -r requirements.txt
 
       - name: Download & Install MetaTrader 5
+        env:
+          MT5_LOGIN: ${{ secrets.MT5_LOGIN }}
+          MT5_PASSWORD: ${{ secrets.MT5_PASSWORD }}
+          MT5_SERVER: ${{ secrets.MT5_SERVER }}
         shell: powershell
         run: |
           Write-Host "Downloading Elefin MetaTrader 5 setup..."
           $setupUrl = "https://download.terminal.free/cdn/web/elefin.ltd/mt5/elefin5setup.exe"
           Invoke-WebRequest -Uri $setupUrl -OutFile "elefin5setup.exe"
           
-          Write-Host "Installing Elefin MT5 silently..."
-          $proc = Start-Process -FilePath ".\elefin5setup.exe" -ArgumentList "/auto" -PassThru
+          Write-Host "Installing MetaTrader 5 silently..."
+          Start-Process -FilePath ".\elefin5setup.exe" -ArgumentList "/auto" -Wait
+          Write-Host "MetaTrader 5 installation complete."
           
-          $timeout = 60
-          $sw = [System.Diagnostics.Stopwatch]::StartNew()
-          while ($sw.Elapsed.TotalSeconds -lt $timeout) {
-            $found = Get-ChildItem -Path "C:\Program Files" -Filter "terminal64.exe" -Recurse -ErrorAction SilentlyContinue
-            if ($found) {
-              Write-Host "MT5 Binary detected:"
-              Write-Host $found.FullName
-              Start-Sleep -Seconds 5
-              break
-            }
-            Start-Sleep -Seconds 2
+          $termPath = "C:\Program Files\Elefin MT5 Terminal\terminal64.exe"
+          if (-not (Test-Path $termPath)) {
+            $found = Get-ChildItem -Path "C:\Program Files" -Filter "terminal64.exe" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($found) { $termPath = $found.FullName }
           }
+          Write-Host "Detected MT5 Binary: $termPath"
           
-          Stop-Process -Name "elefin5setup" -Force -ErrorAction SilentlyContinue
+          # Write startup config to automatically log into broker and bypass modal wizard
+          $configPath = "C:\mt5_config.ini"
+          $configContent = @"
+[Common]
+Login=$($env:MT5_LOGIN)
+Password=$($env:MT5_PASSWORD)
+Server=$($env:MT5_SERVER)
+"@
+          Set-Content -Path $configPath -Value $configContent
+          Write-Host "MT5 configuration generated at $configPath"
           
-          $allFound = Get-ChildItem -Path "C:\Program Files" -Filter "terminal64.exe" -Recurse -ErrorAction SilentlyContinue
-          Write-Host "Final Installed MT5 locations:"
-          if ($allFound) {
-            $allFound | ForEach-Object { Write-Host $_.FullName }
-          }
-          
-          # Ensure MT5 terminal is actively running in background so Python IPC connects instantly
-          $termProc = Get-Process -Name "terminal64" -ErrorAction SilentlyContinue
-          if (-not $termProc) {
-            $termPath = "C:\Program Files\Elefin MT5 Terminal\terminal64.exe"
-            if (-not (Test-Path $termPath) -and $allFound) {
-              $termPath = $allFound[0].FullName
-            }
-            Write-Host "Launching MT5 terminal in background:"
-            Write-Host $termPath
-            Start-Process -FilePath $termPath
-            Start-Sleep -Seconds 15
-          } else {
-            Write-Host "MT5 terminal process is already running."
-          }
+          Write-Host "Pre-launching MT5 terminal with broker config..."
+          Start-Process -FilePath $termPath -ArgumentList "/config:$configPath"
+          Start-Sleep -Seconds 15
+          Get-Process -Name "terminal64" -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "Terminal running with PID: $($_.Id)" }
 
 
 

@@ -90,36 +90,64 @@ def run_scanner():
     term_path = find_terminal_path()
     print(f"Detected MT5 Terminal Binary: {term_path}")
     
+    login_int = int(MT5_LOGIN)
+    print(f"Connecting to MT5 via account #{login_int} on {MT5_SERVER}...")
+    
     init_ok = False
-    # First try attaching to already running instance
+    # Attempt 1: Attach to running terminal with credentials
     try:
-        init_ok = mt5.initialize()
-    except Exception:
+        init_ok = mt5.initialize(
+            login=login_int,
+            password=MT5_PASSWORD,
+            server=MT5_SERVER,
+            timeout=30000
+        )
+    except Exception as e:
+        print(f"Attach with credentials failed: {e}")
         init_ok = False
 
+    # Attempt 2: Explicit launch with terminal binary path
     if not init_ok and term_path:
-        print(f"Attaching failed, attempting explicit launch via: {term_path}")
-        init_ok = mt5.initialize(path=term_path)
+        print(f"Attempting explicit terminal launch: {term_path}")
+        try:
+            init_ok = mt5.initialize(
+                path=term_path,
+                login=login_int,
+                password=MT5_PASSWORD,
+                server=MT5_SERVER,
+                timeout=60000
+            )
+        except Exception as e:
+            print(f"Path launch failed: {e}")
+            init_ok = False
+            
+    # Attempt 3: Bare attach
+    if not init_ok:
+        print("Attempting bare attach...")
+        try:
+            init_ok = mt5.initialize()
+        except Exception as e:
+            print(f"Bare attach failed: {e}")
+            init_ok = False
         
     if not init_ok:
         err = mt5.last_error()
         print(f"[ERROR] MT5 initialize failed: {err}")
         notifier.send_message(f"⚠️ <b>MT5 Init Failed:</b> <code>{err}</code>")
         sys.exit(1)
-
-
-        
-    # 4. Login to Broker Account
-    login_int = int(MT5_LOGIN)
-    authorized = mt5.login(login=login_int, password=MT5_PASSWORD, server=MT5_SERVER)
-    if not authorized:
-        err = mt5.last_error()
-        print(f"[ERROR] Failed to login to MT5 account #{login_int} on server {MT5_SERVER}: {err}")
-        notifier.send_message(f"⚠️ <b>MT5 Login Failed:</b> Account #{login_int} on {MT5_SERVER} failed: <code>{err}</code>")
-        mt5.shutdown()
-        sys.exit(1)
         
     acc = mt5.account_info()
+    if not acc or acc.login != login_int:
+        print(f"Authenticating account #{login_int} on {MT5_SERVER}...")
+        auth_ok = mt5.login(login=login_int, password=MT5_PASSWORD, server=MT5_SERVER)
+        if not auth_ok:
+            err = mt5.last_error()
+            print(f"[ERROR] Failed to login to MT5 account #{login_int} on server {MT5_SERVER}: {err}")
+            notifier.send_message(f"⚠️ <b>MT5 Login Failed:</b> Account #{login_int} on {MT5_SERVER} failed: <code>{err}</code>")
+            mt5.shutdown()
+            sys.exit(1)
+        acc = mt5.account_info()
+        
     if not acc:
         print("[ERROR] Could not retrieve account information.")
         mt5.shutdown()
