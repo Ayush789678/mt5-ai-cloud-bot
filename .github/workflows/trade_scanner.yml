@@ -1,0 +1,50 @@
+name: 24/7 AI MT5 Trade Scanner
+
+on:
+  schedule:
+    # Run every 30 minutes Monday through Friday (Forex active sessions)
+    - cron: '*/30 * * * 1-5'
+  workflow_dispatch: # Allows manual 1-click trigger anytime from GitHub UI or Phone
+
+concurrency:
+  group: trading-bot
+  cancel-in-progress: false
+
+jobs:
+  trade-scan:
+    name: Run AI Market Scan & Execute
+    runs-on: windows-latest
+    steps:
+      - name: Checkout Code & Models
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install Python Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Download & Install MetaTrader 5
+        shell: powershell
+        run: |
+          Write-Host "Downloading Elefin MetaTrader 5 setup..."
+          $setupUrl = "https://download.terminal.free/cdn/web/elefin.ltd/mt5/elefin5setup.exe"
+          Invoke-WebRequest -Uri $setupUrl -OutFile "elefin5setup.exe"
+          Write-Host "Installing MetaTrader 5 silently..."
+          Start-Process -FilePath ".\elefin5setup.exe" -ArgumentList "/auto" -Wait
+          Write-Host "MetaTrader 5 installation complete."
+
+      - name: Execute Autonomous AI Market Scan
+        env:
+          MT5_LOGIN: ${{ secrets.MT5_LOGIN }}
+          MT5_PASSWORD: ${{ secrets.MT5_PASSWORD }}
+          MT5_SERVER: ${{ secrets.MT5_SERVER }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          python scanner_job.py
