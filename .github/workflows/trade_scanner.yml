@@ -32,12 +32,28 @@ jobs:
       - name: Download & Install MetaTrader 5
         shell: powershell
         run: |
-          Write-Host "Downloading Elefin MetaTrader 5 setup..."
-          $setupUrl = "https://download.terminal.free/cdn/web/elefin.ltd/mt5/elefin5setup.exe"
-          Invoke-WebRequest -Uri $setupUrl -OutFile "elefin5setup.exe"
-          Write-Host "Installing MetaTrader 5 silently..."
-          Start-Process -FilePath ".\elefin5setup.exe" -ArgumentList "/auto" -Wait
-          Write-Host "MetaTrader 5 installation complete."
+          Write-Host "Downloading MetaTrader 5 setup..."
+          $url1 = "https://download.terminal.free/cdn/web/elefin.ltd/mt5/elefin5setup.exe"
+          $url2 = "https://download.mql5.com/cdn/web/metaquotes.software.corp/mt5/mt5setup.exe"
+          
+          try {
+            Invoke-WebRequest -Uri $url1 -OutFile "elefin5setup.exe"
+            Start-Process -FilePath ".\elefin5setup.exe" -ArgumentList "/auto" -Wait
+          } catch {
+            Write-Host "Elefin setup download failed, trying standard MT5 setup..."
+          }
+          
+          $found = Get-ChildItem -Path "C:\Program Files" -Filter "terminal64.exe" -Recurse -ErrorAction SilentlyContinue
+          if (-not $found) {
+            Write-Host "Searching full drive for terminal64.exe or installing official MT5..."
+            Invoke-WebRequest -Uri $url2 -OutFile "mt5setup.exe"
+            Start-Process -FilePath ".\mt5setup.exe" -ArgumentList "/auto" -Wait
+            $found = Get-ChildItem -Path "C:\Program Files" -Filter "terminal64.exe" -Recurse -ErrorAction SilentlyContinue
+          }
+          
+          Write-Host "Installed MT5 terminal locations:"
+          $found | ForEach-Object { Write-Host "  -> $($_.FullName)" }
+
 
       - name: Execute Autonomous AI Market Scan
         env:

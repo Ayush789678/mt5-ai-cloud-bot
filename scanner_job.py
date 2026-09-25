@@ -50,6 +50,25 @@ def calculate_dynamic_lot(p_win: float, u_epi: float, balance: float) -> tuple:
     est_win = lot * 200.0
     return lot, est_win, conv, tier
 
+def find_terminal_path():
+    possible_paths = [
+        r"C:\Program Files\MetaTrader 5\terminal64.exe",
+        r"C:\Program Files\Elefin MetaTrader 5\terminal64.exe",
+        r"C:\Program Files\Elefin\terminal64.exe",
+        r"C:\Program Files\Elefin Ltd\terminal64.exe",
+        r"C:\Program Files (x86)\MetaTrader 5\terminal64.exe"
+    ]
+    for p in possible_paths:
+        if os.path.exists(p):
+            return p
+    # Dynamic search across Program Files
+    for base in [r"C:\Program Files", r"C:\Program Files (x86)", os.environ.get("LOCALAPPDATA", "")]:
+        if base and os.path.exists(base):
+            for root, dirs, files in os.walk(base):
+                if "terminal64.exe" in files:
+                    return os.path.join(root, "terminal64.exe")
+    return None
+
 def run_scanner():
     print("=" * 75)
     print("      AI QUANTITATIVE MT5 MARKET SCANNER (GITHUB ACTIONS RUNNER)     ")
@@ -67,13 +86,22 @@ def run_scanner():
         notifier.send_message("⚠️ <b>Scanner Error:</b> MetaTrader5 package missing on runner.")
         sys.exit(1)
         
-    # 3. Initialize MT5 Connection
-    print("Initializing MetaTrader 5 Terminal...")
-    if not mt5.initialize():
+    # 3. Locate and Initialize MT5 Connection
+    term_path = find_terminal_path()
+    print(f"Detected MT5 Terminal Binary: {term_path}")
+    
+    init_ok = False
+    if term_path:
+        init_ok = mt5.initialize(path=term_path)
+    else:
+        init_ok = mt5.initialize()
+        
+    if not init_ok:
         err = mt5.last_error()
         print(f"[ERROR] MT5 initialize failed: {err}")
         notifier.send_message(f"⚠️ <b>MT5 Init Failed:</b> <code>{err}</code>")
         sys.exit(1)
+
         
     # 4. Login to Broker Account
     login_int = int(MT5_LOGIN)
