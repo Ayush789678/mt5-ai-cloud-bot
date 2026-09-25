@@ -17,6 +17,37 @@ if hasattr(sys.stderr, 'reconfigure'):
 
 from telegram_bot import TelegramNotifier
 
+# Golden DoubleEnsemble Architecture definition for unpickling
+class GPUDoubleEnsemble:
+    def __init__(self, random_state=42, max_epistemic_disagreement=0.20):
+        self.random_state = random_state
+        self.max_epistemic_disagreement = max_epistemic_disagreement
+        self.xgb_base = None
+        self.xgb_reweighted = None
+        self.cat_model = None
+        self.weights = [0.50, 0.50]
+        self.feature_names = None
+        self.pair_thresholds = {}
+        self.daily_top_k = 5
+
+    def predict_with_uncertainty(self, X_input):
+        p_xgb = self.xgb_reweighted.predict_proba(X_input)[:, 1]
+        p_cat = self.cat_model.predict_proba(X_input)[:, 1]
+        u_epistemic = np.abs(p_xgb - p_cat)
+        p_blend = self.weights[0] * p_xgb + self.weights[1] * p_cat
+        is_hallucination = u_epistemic > self.max_epistemic_disagreement
+        return p_blend, u_epistemic, is_hallucination
+
+    def predict_proba(self, X_input):
+        p_blend, _, _ = self.predict_with_uncertainty(X_input)
+        return np.column_stack([1.0 - p_blend, p_blend])
+
+    def predict(self, X_input, threshold=0.60):
+        p_blend, _, is_hal = self.predict_with_uncertainty(X_input)
+        return np.where((p_blend > threshold) & (~is_hal), 1, 0)
+
+sys.modules['__main__'].GPUDoubleEnsemble = GPUDoubleEnsemble
+
 # 1. Credentials & Risk Configuration (from GitHub Secrets / Environment)
 MT5_LOGIN = os.getenv("MT5_LOGIN", "12345868444")
 MT5_PASSWORD = os.getenv("MT5_PASSWORD", "Ayush5555@")
