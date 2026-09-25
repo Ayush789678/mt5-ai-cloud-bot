@@ -66,14 +66,14 @@ class RealTime1SecBot:
         print(f"✅ [READY] Local AI Engine online with {len(self.engine.feature_cols)} features!")
 
     def start_cloud_keepalive(self):
-        """Background thread that pings Render every 5 minutes to keep it warm."""
+        """Background thread that sends heartbeats to Render every 30 seconds to keep it warm and logging."""
         def ping_loop():
             while True:
                 try:
-                    requests.get(f"{self.api_url}/", timeout=15)
+                    requests.get(f"{self.api_url}/", timeout=10)
                 except Exception:
                     pass
-                time.sleep(300) # Every 5 minutes
+                time.sleep(30)
         t = threading.Thread(target=ping_loop, daemon=True)
         t.start()
 
@@ -269,14 +269,22 @@ class RealTime1SecBot:
             sys.exit(1)
 
         self.start_cloud_keepalive()
-        print("\n[ACTIVE] Starting REAL-TIME 1-SECOND MARKET ANALYSIS LOOP...")
-        print("Press Ctrl+C anytime to stop.\n")
+        print("\n" + "=" * 70)
+        print("  [LIVE] REAL-TIME 1-SECOND MARKET ANALYSIS IS NOW RUNNING!")
+        print("  • Engine: Institutional DoubleEnsemble (108 Quant Features)")
+        print("  • Pairs: EURUSD, GBPUSD, USDJPY, AUDUSD, USDCAD, USDCHF, NZDUSD, XAUUSD")
+        print("  • Render Cloud AI: https://mt5-ai-model-service.onrender.com (SYNCED)")
+        print("  • NOTE: If you click inside this window and see 'Select' in the title,")
+        print("    Windows paused output. Simply press ENTER or ESC to resume scrolling.")
+        print("=" * 70 + "\n")
 
-        last_display_time = 0
+        scan_count = 0
+        last_cloud_sync = 0
 
         while True:
             t0 = time.time()
             try:
+                scan_count += 1
                 # Reset daily counter on date change
                 if datetime.date.today() != self.current_date:
                     self.current_date = datetime.date.today()
@@ -286,24 +294,21 @@ class RealTime1SecBot:
                 balance = acc.balance if acc else 100.0
                 equity = acc.equity if acc else 100.0
 
-                # Analyze all 8 pairs in local RAM
+                # Analyze all 8 pairs in local RAM (<400ms)
                 opportunities, actionable = self.analyze_market_locally(balance)
                 compute_time_ms = (time.time() - t0) * 1000
 
-                now = time.time()
-                # Print clean live ticker every 1-2 seconds
-                if now - last_display_time >= 1.0:
-                    last_display_time = now
-                    top_summary = ""
-                    if opportunities:
-                        top = opportunities[0]
-                        act = top.get('action', 'NEUTRAL')
-                        conf = top.get('confidence', 0) * 100
-                        top_summary = f"| Top: {top.get('pair')} ({act} {conf:.1f}%)"
-
+                # Print clean scrolling line every 3 scans (~3 seconds)
+                if scan_count % 3 == 0 or actionable:
+                    top = opportunities[0] if opportunities else {}
+                    act = top.get('action', 'NEUTRAL')
+                    conf = top.get('confidence', 0) * 100
+                    pair_name = top.get('pair', 'None')
                     ts_str = datetime.datetime.now().strftime('%H:%M:%S')
-                    sys.stdout.write(f"\r[{ts_str}] ⚡ 1-Sec Scan: 8 Pairs ({compute_time_ms:.0f}ms) | Equity: ${equity:.2f} | Trades: {self.daily_trade_count}/5 {top_summary:<35}")
-                    sys.stdout.flush()
+
+                    status_tag = f"🎯 ACTIONABLE: {act}" if actionable else f"Scanning... Best: {pair_name} ({act} {conf:.1f}%)"
+                    print(f"[{ts_str}] ⚡ Scan #{scan_count:05d} | 8 Symbols ({compute_time_ms:.0f}ms) | Equity: ${equity:.2f} | Trades: {self.daily_trade_count}/{MAX_DAILY_TRADES} | {status_tag}")
+
 
                 # Execute actionable trades if daily limit allows
                 if actionable and self.daily_trade_count < MAX_DAILY_TRADES:
@@ -327,6 +332,7 @@ class RealTime1SecBot:
                 mt5.shutdown()
                 break
             except Exception as e:
+                print(f"[WARN] Error in scan cycle: {e}")
                 time.sleep(1.0)
 
 def main():

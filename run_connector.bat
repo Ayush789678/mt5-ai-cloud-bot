@@ -21,6 +21,6 @@ if not exist ".venv\Scripts\python.exe" (
 echo [ACTIVE] Connecting to MT5 and starting 1-second live decision engine...
 echo.
 
-.\.venv\Scripts\python.exe mt5_local_connector.py
+.\.venv\Scripts\python.exe -u mt5_local_connector.py
 
 pause
