@@ -15,8 +15,8 @@ if not exist ".venv\Scripts\python.exe" (
 )
 
 :: Prompt for Render URL or use default
-set /p RENDER_URL="Enter Render Server URL [Press Enter for default localhost:8000]: "
-if "%RENDER_URL%"=="" set RENDER_URL=http://127.0.0.1:8000
+set /p RENDER_URL="Enter Render Server URL [Press Enter for default https://mt5-ai-model-service.onrender.com]: "
+if "%RENDER_URL%"=="" set RENDER_URL=https://mt5-ai-model-service.onrender.com
 
 echo.
 echo Connecting to AI Cloud at: %RENDER_URL%
