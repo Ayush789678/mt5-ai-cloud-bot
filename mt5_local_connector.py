@@ -47,7 +47,7 @@ TIMEFRAME_MT5 = mt5.TIMEFRAME_M15
 
 MAX_CONCURRENT_POSITIONS = int(os.getenv("MAX_CONCURRENT_POSITIONS", "2"))
 MAX_DAILY_TRADES = int(os.getenv("MAX_DAILY_TRADES", "5"))
-DAILY_MAX_LOSS = float(os.getenv("DAILY_MAX_LOSS", "-6.0"))
+DAILY_MAX_LOSS = float(os.getenv("DAILY_MAX_LOSS", "-10.0"))  # $10 daily drawdown limit
 DAILY_PROFIT_GOAL = float(os.getenv("DAILY_PROFIT_GOAL", "20.0"))
 MAGIC_NUMBER = 888999
 
@@ -55,9 +55,9 @@ class RealTime1SecBot:
     def __init__(self, api_url: str = DEFAULT_RENDER_URL):
         self.api_url = api_url.rstrip("/")
         self.notifier = TelegramNotifier(TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID)
-        self.daily_trade_count = 0
         self.current_date = datetime.date.today()
         self.last_traded_bar = {}
+        self.drawdown_alert_sent = False
         
         # Load Institutional AI Brain directly into local memory for sub-second analysis
         print("[INIT] Loading AI Golden DoubleEnsemble into local RAM for 1-second analysis...")
@@ -122,7 +122,82 @@ class RealTime1SecBot:
         df.index = pd.to_datetime(df['time'], unit='s')
         return df
 
-    def analyze_market_locally(self, balance: float) -> tuple:
+    def get_today_stats(self) -> dict:
+        """
+        Accurately queries MT5 deal history and active positions for today.
+        Tracks:
+        - Total trade entries opened today (active + closed)
+        - Closed PnL realized today
+        - Floating PnL of open positions
+        - Total Daily Net PnL (Closed + Floating)
+        """
+        now = datetime.datetime.now()
+        today_start = datetime.datetime.combine(datetime.date.today(), datetime.time.min)
+
+        deals = mt5.history_deals_get(today_start, now)
+        today_orders = set()
+        closed_pnl = 0.0
+
+        if deals:
+            for d in deals:
+                if d.entry == mt5.DEAL_ENTRY_IN and d.order > 0:
+                    today_orders.add(d.order)
+                elif d.entry == mt5.DEAL_ENTRY_OUT:
+                    closed_pnl += float(d.profit) + float(d.swap) + float(d.commission)
+
+        positions = mt5.positions_get()
+        open_count = len(positions) if positions else 0
+        floating_pnl = sum(p.profit for p in positions) if positions else 0.0
+
+        for p in (positions or []):
+            today_orders.add(p.ticket)
+
+        total_trades_today = max(len(today_orders), open_count)
+        total_daily_pnl = round(closed_pnl + floating_pnl, 2)
+
+        return {
+            "total_trades_today": total_trades_today,
+            "open_positions_count": open_count,
+            "closed_pnl": round(closed_pnl, 2),
+            "floating_pnl": round(floating_pnl, 2),
+            "total_daily_pnl": total_daily_pnl
+        }
+
+    def calculate_model_lot(self, p_win: float, u_epi: float, conv: float, pair: str, balance: float, open_count: int) -> tuple:
+        """
+        Calculates dynamic position size based on Option C quantitative conviction:
+        - ULTRA (0.03 lot): Top-decile A+ setup (p_win >= 70% and conv >= 0.65 and u_epi <= 0.10) -> +$9.00 TP / -$6.00 SL
+        - STRONG (0.02 lot): High-conviction setup (p_win >= 66% and conv >= 0.60 and u_epi <= 0.14) -> +$6.00 TP / -$4.00 SL
+        - DEFENSIVE (0.01 lot): Standard valid setup (p_win >= 64%) or when already holding 1 open position -> +$3.00 TP / -$2.00 SL
+        - Gold (XAUUSD): Strictly 0.01 lot for accounts under $150 to prevent excessive drawdown
+        """
+        # If 1 position is already open, use defensive sizing to avoid double overexposure
+        has_open_position = open_count >= 1
+
+        if pair == "XAUUSD":
+            if balance >= 150.0 and p_win >= 0.72 and conv >= 0.66:
+                return 0.02, "ULTRA (Gold 0.02 lot)"
+            else:
+                return 0.01, "STANDARD (Gold 0.01 lot)"
+
+        if conv >= 0.65 and p_win >= 0.70 and u_epi <= 0.10 and not has_open_position:
+            lot = 0.03
+            tier = "ULTRA (0.03 lot — A+ Conviction)"
+        elif conv >= 0.60 and p_win >= 0.66 and u_epi <= 0.14:
+            lot = 0.02
+            tier = "STRONG (0.02 lot — Solid Momentum)"
+        else:
+            lot = 0.01
+            tier = "DEFENSIVE (0.01 lot — Conservative)"
+
+        # Account scaling: if balance grows above $200, scale safely
+        if balance >= 200.0:
+            scale = min(2.0, balance / 100.0)
+            lot = round(lot * scale, 2)
+
+        return lot, tier
+
+    def analyze_market_locally(self, balance: float, open_count: int = 0) -> tuple:
         opportunities = []
         for pair in PAIRS:
             df = self.fetch_pair_candles(pair, count=150)
@@ -136,26 +211,14 @@ class RealTime1SecBot:
                 u_epi = float(res.get('u_epistemic', 0.0))
                 conv = p_win - 0.5 * u_epi
 
-                if conv >= 0.57 and p_win >= 0.62:
-                    lot = 0.03
-                    tier = "ULTRA"
-                elif conv >= 0.52:
-                    lot = 0.02
-                    tier = "STANDARD"
-                else:
-                    lot = 0.01
-                    tier = "DEFENSIVE"
-
-                bal_ratio = max(0.5, balance / 100.0)
-                lot = round(lot * bal_ratio, 2)
-                lot = max(0.01, min(lot, 0.05))
+                lot, tier = self.calculate_model_lot(p_win, u_epi, conv, pair, balance, open_count)
 
                 res['recommended_lot'] = lot
                 res['conviction_tier'] = tier
                 res['effective_conviction'] = round(conv, 4)
                 res['win_probability'] = p_win
                 res['epistemic_uncertainty'] = u_epi
-                res['is_hallucination'] = u_epi > 0.20
+                res['is_hallucination'] = u_epi > 0.15
                 res['confidence_passed'] = res.get('status') == 'CONFIRMED'
                 opportunities.append(res)
             except Exception:
@@ -190,7 +253,7 @@ class RealTime1SecBot:
         point = sym_info.point
 
         if pair == "XAUUSD":
-            lot = 0.01
+            lot = min(float(opp.get('recommended_lot', 0.01)), 0.02)
             sl_dist = 5.00  # Option C: $5.00 SL
             tp_dist = 7.50  # Option C: $7.50 TP (1:1.5 Positive RR)
             if action == "BUY":
@@ -237,7 +300,7 @@ class RealTime1SecBot:
             "type_filling": mt5.ORDER_FILLING_IOC,
         }
 
-        print(f"\n[ORDER EXECUTION] Sending {action} {lot} lots on {pair} @ {price:.5f} (SL: {sl}, TP: {tp})...")
+        print(f"\n[ORDER EXECUTION] Sending {action} {lot} lots on {pair} @ {price:.5f} (Tier: {conviction}) (SL: {sl}, TP: {tp})...")
         result = mt5.order_send(request)
         if result and result.retcode == mt5.TRADE_RETCODE_DONE:
             print(f"✅ [SUCCESS] Order placed! Ticket: #{result.order} | Retcode: {result.retcode}")
@@ -420,17 +483,39 @@ class RealTime1SecBot:
             t0 = time.time()
             try:
                 scan_count += 1
-                # Reset daily counter on date change
+                # Reset daily alert on date change
                 if datetime.date.today() != self.current_date:
                     self.current_date = datetime.date.today()
-                    self.daily_trade_count = 0
+                    self.drawdown_alert_sent = False
 
                 acc = mt5.account_info()
                 balance = acc.balance if acc else 100.0
                 equity = acc.equity if acc else 100.0
 
-                # Analyze all 8 pairs in local RAM (<400ms)
-                opportunities, actionable = self.analyze_market_locally(balance)
+                # 1. Real-time today's trade count and daily PnL from MT5 history
+                stats = self.get_today_stats()
+                today_trades = stats['total_trades_today']
+                open_count = stats['open_positions_count']
+                daily_pnl = stats['total_daily_pnl']
+
+                # 2. Check Daily Risk Controls
+                is_drawdown_limit_hit = (daily_pnl <= DAILY_MAX_LOSS) # -$10.00
+                is_profit_goal_hit = (daily_pnl >= DAILY_PROFIT_GOAL)   # +$20.00
+
+                # Send Telegram alert once if drawdown limit hit
+                if is_drawdown_limit_hit and not self.drawdown_alert_sent:
+                    self.drawdown_alert_sent = True
+                    self.notifier.send_message(
+                        f"🛑 <b>DAILY RISK CIRCUIT BREAKER HIT!</b>\n"
+                        f"━━━━━━━━━━━━━━━━━━\n"
+                        f"Total daily drawdown reached ${daily_pnl:+.2f} (Limit: ${DAILY_MAX_LOSS:.2f}).\n"
+                        f"New trade execution is <b>PAUSED for today</b> to protect capital.\n"
+                        f"Existing positions remain actively managed.\n"
+                        f"━━━━━━━━━━━━━━━━━━"
+                    )
+
+                # Analyze all 8 pairs in local RAM (<400ms) with open_count context
+                opportunities, actionable = self.analyze_market_locally(balance, open_count)
                 compute_time_ms = (time.time() - t0) * 1000
 
                 # Manage all positions (Auto SL/TP for manual trades, Break-Even, AI Reversal Exits)
@@ -445,12 +530,21 @@ class RealTime1SecBot:
                     pair_name = top.get('pair', 'None')
                     ts_str = datetime.datetime.now().strftime('%H:%M:%S')
 
-                    status_tag = f"🎯 ACTIONABLE: {act}" if actionable else f"Scanning... Best: {pair_name} ({act} {conf:.1f}%)"
-                    print(f"[{ts_str}] ⚡ Scan #{scan_count:05d} | 8 Symbols ({compute_time_ms:.0f}ms) | Equity: ${equity:.2f} | Trades: {self.daily_trade_count}/{MAX_DAILY_TRADES} | {status_tag}")
+                    if is_drawdown_limit_hit:
+                        status_tag = f"🛑 PAUSED: Daily Drawdown Limit (-$10.00) Hit! (PnL: ${daily_pnl:+.2f})"
+                    elif today_trades >= MAX_DAILY_TRADES:
+                        status_tag = f"✅ MAX TRADES REACHED ({today_trades}/{MAX_DAILY_TRADES}) | PnL: ${daily_pnl:+.2f}"
+                    elif actionable:
+                        status_tag = f"🎯 ACTIONABLE: {act}"
+                    else:
+                        status_tag = f"Scanning... Best: {pair_name} ({act} {conf:.1f}%) | PnL: ${daily_pnl:+.2f}"
 
+                    print(f"[{ts_str}] ⚡ Scan #{scan_count:05d} | 8 Symbols ({compute_time_ms:.0f}ms) | Equity: ${equity:.2f} | Trades: {today_trades}/{MAX_DAILY_TRADES} (Open: {open_count}) | {status_tag}")
 
-                # Execute actionable trades if daily limit allows
-                if actionable and self.daily_trade_count < MAX_DAILY_TRADES:
+                # Execute actionable trades ONLY if daily limits allow
+                can_open_trades = (today_trades < MAX_DAILY_TRADES) and (not is_drawdown_limit_hit) and (open_count < MAX_CONCURRENT_POSITIONS)
+
+                if actionable and can_open_trades:
                     for opp in actionable:
                         pair = opp['pair']
                         df = self.fetch_pair_candles(pair, count=50)
