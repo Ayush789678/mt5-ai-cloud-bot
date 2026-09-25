@@ -191,8 +191,8 @@ class RealTime1SecBot:
 
         if pair == "XAUUSD":
             lot = 0.01
-            sl_dist = 6.00
-            tp_dist = 4.00
+            sl_dist = 5.00  # Option C: $5.00 SL
+            tp_dist = 7.50  # Option C: $7.50 TP (1:1.5 Positive RR)
             if action == "BUY":
                 order_type = mt5.ORDER_TYPE_BUY
                 price = tick.ask
@@ -206,18 +206,17 @@ class RealTime1SecBot:
             else:
                 return
         else:
+            pip_unit = point * 10 if digits in (3, 5) else point
+            sl_pips = 20 * pip_unit  # Option C: 20 pips SL
+            tp_pips = 30 * pip_unit  # Option C: 30 pips TP (1:1.5 Positive RR)
             if action == "BUY":
                 order_type = mt5.ORDER_TYPE_BUY
                 price = tick.ask
-                sl_pips = 30 * (point * 10 if digits in (3, 5) else point)
-                tp_pips = 20 * (point * 10 if digits in (3, 5) else point)
                 sl = round(price - sl_pips, digits)
                 tp = round(price + tp_pips, digits)
             elif action == "SELL":
                 order_type = mt5.ORDER_TYPE_SELL
                 price = tick.bid
-                sl_pips = 30 * (point * 10 if digits in (3, 5) else point)
-                tp_pips = 20 * (point * 10 if digits in (3, 5) else point)
                 sl = round(price + sl_pips, digits)
                 tp = round(price - tp_pips, digits)
             else:
@@ -296,13 +295,13 @@ class RealTime1SecBot:
             # 1. AUTO-PROTECTIVE SL/TP FOR MANUAL TRADES (or any trade with missing SL/TP)
             if sl == 0.0 or tp == 0.0:
                 if pair == "XAUUSD":
-                    sl_dist = 6.00
-                    tp_dist = 4.00
+                    sl_dist = 5.00
+                    tp_dist = 7.50
                     new_sl = round(open_price - sl_dist if pos_type == 0 else open_price + sl_dist, digits)
                     new_tp = round(open_price + tp_dist if pos_type == 0 else open_price - tp_dist, digits)
                 else:
-                    sl_pips = 30 * pip_unit
-                    tp_pips = 20 * pip_unit
+                    sl_pips = 20 * pip_unit
+                    tp_pips = 30 * pip_unit
                     new_sl = round(open_price - sl_pips if pos_type == 0 else open_price + sl_pips, digits)
                     new_tp = round(open_price + tp_pips if pos_type == 0 else open_price - tp_pips, digits)
 

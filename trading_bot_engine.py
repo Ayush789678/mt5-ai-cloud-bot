@@ -82,7 +82,7 @@ class UnifiedTradingBotEngine:
             self.feature_cols = json.load(f)
 
         self.pair_thresholds = getattr(self.model, 'pair_thresholds', self.meta.get('pair_thresholds', {}))
-        self.universal_threshold = self.meta.get('universal_threshold', 0.85)
+        self.universal_threshold = self.meta.get('universal_threshold', 0.65)
 
         # 2. Load Macro Engine Cache (Parquet)
         macro_parquet = os.path.join(self.model_dir, "training_data", "macro_daily_lagged.parquet")
@@ -394,20 +394,20 @@ class UnifiedTradingBotEngine:
 
         req_thresh = self.pair_thresholds.get(pair, self.universal_threshold)
 
-        # Risk & Kelly
-        b = 0.60 / 1.20 # odds ratio
+        # Risk & Kelly (Option C: Positive 1:1.5 - 1:2 RR)
+        b = 1.35 / 0.80 # odds ratio: 1.6875 (Positive Risk-Reward)
         q = 1.0 - p_win
         kelly = max(0.0, (b * p_win - q) / b) * 0.50 # half-kelly
         risk_pct = min(kelly, 0.05) * 100.0
 
         if best_sig == 1:
             action = "BUY"
-            tp = price + 0.60 * atr
-            sl = price - 1.20 * atr
+            tp = price + 1.35 * atr
+            sl = price - 0.80 * atr
         elif best_sig == -1:
             action = "SELL"
-            tp = price - 0.60 * atr
-            sl = price + 1.20 * atr
+            tp = price - 1.35 * atr
+            sl = price + 0.80 * atr
         else:
             action = "NEUTRAL"
             tp = price; sl = price
