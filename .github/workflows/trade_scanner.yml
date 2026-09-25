@@ -2,14 +2,8 @@ name: 24/7 AI MT5 Trade Scanner
 
 on:
   schedule:
-    # PEAK: Every 10 min during London+NY overlap (07:00-16:00 UTC / 12:30-9:30 PM IST)
-    - cron: '*/10 7-15 * * 1-5'
-    # ACTIVE: Every 15 min during early London & late NY (04:00-07:00 & 16:00-21:00 UTC)
-    - cron: '*/15 4-6 * * 1-5'
-    - cron: '*/15 16-20 * * 1-5'
-    # QUIET: Every 30 min during Asian session (21:00-03:59 UTC) - lower volatility
-    - cron: '*/30 21-23 * * 1-5'
-    - cron: '*/30 0-3 * * 1-5'
+    # Continuous scanning: every 5 minutes, Mon-Fri (minimum GitHub Actions interval)
+    - cron: '*/5 * * * 1-5'
   workflow_dispatch: # Allows manual 1-click trigger anytime from GitHub UI or Phone
 
 concurrency:
