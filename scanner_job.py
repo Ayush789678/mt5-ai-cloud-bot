@@ -91,16 +91,22 @@ def run_scanner():
     print(f"Detected MT5 Terminal Binary: {term_path}")
     
     init_ok = False
-    if term_path:
-        init_ok = mt5.initialize(path=term_path)
-    else:
+    # First try attaching to already running instance
+    try:
         init_ok = mt5.initialize()
+    except Exception:
+        init_ok = False
+
+    if not init_ok and term_path:
+        print(f"Attaching failed, attempting explicit launch via: {term_path}")
+        init_ok = mt5.initialize(path=term_path)
         
     if not init_ok:
         err = mt5.last_error()
         print(f"[ERROR] MT5 initialize failed: {err}")
         notifier.send_message(f"⚠️ <b>MT5 Init Failed:</b> <code>{err}</code>")
         sys.exit(1)
+
 
         
     # 4. Login to Broker Account

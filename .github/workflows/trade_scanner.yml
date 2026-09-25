@@ -52,17 +52,29 @@ jobs:
             Start-Sleep -Seconds 2
           }
           
-          # Terminate auto-launched GUI so Python IPC can initialize the terminal properly
-          Stop-Process -Name "terminal64" -Force -ErrorAction SilentlyContinue
           Stop-Process -Name "elefin5setup" -Force -ErrorAction SilentlyContinue
           
           $allFound = Get-ChildItem -Path "C:\Program Files" -Filter "terminal64.exe" -Recurse -ErrorAction SilentlyContinue
           Write-Host "Final Installed MT5 locations:"
           if ($allFound) {
             $allFound | ForEach-Object { Write-Host $_.FullName }
-          } else {
-            Write-Host "No terminal64.exe found in Program Files yet."
           }
+          
+          # Ensure MT5 terminal is actively running in background so Python IPC connects instantly
+          $termProc = Get-Process -Name "terminal64" -ErrorAction SilentlyContinue
+          if (-not $termProc) {
+            $termPath = "C:\Program Files\Elefin MT5 Terminal\terminal64.exe"
+            if (-not (Test-Path $termPath) -and $allFound) {
+              $termPath = $allFound[0].FullName
+            }
+            Write-Host "Launching MT5 terminal in background:"
+            Write-Host $termPath
+            Start-Process -FilePath $termPath
+            Start-Sleep -Seconds 15
+          } else {
+            Write-Host "MT5 terminal process is already running."
+          }
+
 
 
 
