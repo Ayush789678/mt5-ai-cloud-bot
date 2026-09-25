@@ -93,18 +93,23 @@ class LocalMT5Connector:
         return False
 
     def check_cloud_health(self) -> bool:
-        try:
-            r = requests.get(f"{self.api_url}/", timeout=10)
-            if r.status_code == 200:
-                data = r.json()
-                print(f"[CLOUD AI STATUS] {data.get('status')} | Universal Threshold: {data.get('universal_threshold')}")
-                return True
-            else:
-                print(f"[WARN] Cloud AI Server returned HTTP {r.status_code}")
-                return False
-        except Exception as e:
-            print(f"[WARN] Unable to reach Cloud AI Server at {self.api_url}: {e}")
-            return False
+        print("[CLOUD] Pinging Cloud AI Brain (waking up if asleep, please wait ~30s)...")
+        for attempt in range(1, 4):
+            try:
+                r = requests.get(f"{self.api_url}/", timeout=60)
+                if r.status_code == 200:
+                    data = r.json()
+                    print(f"✅ [CLOUD AI ONLINE] Status: {data.get('status')} | Universal Threshold: {data.get('universal_threshold')}")
+                    return True
+                else:
+                    print(f"[WARN] Cloud AI Server returned HTTP {r.status_code}")
+            except requests.exceptions.Timeout:
+                print(f"[WAKING UP] Server is still booting from sleep (attempt {attempt}/3)...")
+                time.sleep(5)
+            except Exception as e:
+                print(f"[RETRY {attempt}/3] Connecting to Cloud AI at {self.api_url}: {e}")
+                time.sleep(4)
+        return False
 
     def fetch_pair_candles(self, pair: str, count: int = 150) -> list:
         # Ensure symbol selected in Market Watch
