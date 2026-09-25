@@ -263,6 +263,141 @@ class RealTime1SecBot:
             err = result.comment if result else mt5.last_error()
             print(f"❌ [ORDER REJECTED] Code: {result.retcode if result else 'None'} | Reason: {err}")
 
+    def manage_all_positions(self, opportunities_dict: dict):
+        """
+        Active AI Position Manager:
+        1. Auto-assigns protective SL & TP to manual trades (magic == 0 or missing SL/TP).
+        2. Trailing Stop to Break-Even for all trades once in profit (+12 pips or +$2.50 Gold).
+        3. Exits trades early if AI detects a strong confirmed trend reversal (>=70% opposite direction).
+        """
+        positions = mt5.positions_get()
+        if not positions:
+            return
+
+        for pos in positions:
+            pair = pos.symbol
+            ticket = pos.ticket
+            pos_type = pos.type  # 0 = BUY, 1 = SELL
+            open_price = pos.price_open
+            current_price = pos.price_current
+            sl = pos.sl
+            tp = pos.tp
+            profit = pos.profit
+            magic = pos.magic
+
+            sym_info = mt5.symbol_info(pair)
+            if not sym_info:
+                continue
+
+            digits = sym_info.digits
+            point = sym_info.point
+            pip_unit = point * 10 if digits in (3, 5) else point
+
+            # 1. AUTO-PROTECTIVE SL/TP FOR MANUAL TRADES (or any trade with missing SL/TP)
+            if sl == 0.0 or tp == 0.0:
+                if pair == "XAUUSD":
+                    sl_dist = 6.00
+                    tp_dist = 4.00
+                    new_sl = round(open_price - sl_dist if pos_type == 0 else open_price + sl_dist, digits)
+                    new_tp = round(open_price + tp_dist if pos_type == 0 else open_price - tp_dist, digits)
+                else:
+                    sl_pips = 30 * pip_unit
+                    tp_pips = 20 * pip_unit
+                    new_sl = round(open_price - sl_pips if pos_type == 0 else open_price + sl_pips, digits)
+                    new_tp = round(open_price + tp_pips if pos_type == 0 else open_price - tp_pips, digits)
+
+                mod_req = {
+                    "action": mt5.TRADE_ACTION_SLTP,
+                    "position": ticket,
+                    "symbol": pair,
+                    "sl": new_sl,
+                    "tp": new_tp,
+                }
+                res = mt5.order_send(mod_req)
+                if res and res.retcode == mt5.TRADE_RETCODE_DONE:
+                    print(f"🛡️ [AI AUTO-GUARD] Attached protective SL ({new_sl}) & TP ({new_tp}) to trade #{ticket} ({pair})")
+                    self.notifier.send_message(
+                        f"🛡️ <b>AI AUTO-GUARD ACTIVATED!</b>\n"
+                        f"━━━━━━━━━━━━━━━━━━\n"
+                        f"Attached protective levels to trade #{ticket} ({pair}):\n"
+                        f"• <b>Entry:</b> {open_price:.5f}\n"
+                        f"• <b>Protective SL:</b> {new_sl:.5f}\n"
+                        f"• <b>Target TP:</b> {new_tp:.5f}\n"
+                        f"━━━━━━━━━━━━━━━━━━"
+                    )
+
+            # 2. BREAK-EVEN TRAILING STOP (Lock in profits)
+            if pair == "XAUUSD":
+                pips_gain = (current_price - open_price) if pos_type == 0 else (open_price - current_price)
+                can_be = pips_gain >= 2.50
+                be_sl = round(open_price + 0.50 if pos_type == 0 else open_price - 0.50, digits)
+            else:
+                pips_gain = ((current_price - open_price) / pip_unit) if pos_type == 0 else ((open_price - current_price) / pip_unit)
+                can_be = pips_gain >= 12.0
+                be_sl = round(open_price + (2 * pip_unit) if pos_type == 0 else open_price - (2 * pip_unit), digits)
+
+            sl_needs_update = False
+            if can_be:
+                if pos_type == 0 and (sl == 0.0 or sl < open_price):
+                    sl_needs_update = True
+                elif pos_type == 1 and (sl == 0.0 or sl > open_price):
+                    sl_needs_update = True
+
+            if sl_needs_update:
+                be_req = {
+                    "action": mt5.TRADE_ACTION_SLTP,
+                    "position": ticket,
+                    "symbol": pair,
+                    "sl": be_sl,
+                    "tp": tp,
+                }
+                res = mt5.order_send(be_req)
+                if res and res.retcode == mt5.TRADE_RETCODE_DONE:
+                    print(f"🔒 [BREAK-EVEN LOCKED] Moved SL on #{ticket} ({pair}) to {be_sl} (Profit: +{pips_gain:.1f} pips)")
+                    self.notifier.send_message(
+                        f"🔒 <b>BREAK-EVEN LOCKED!</b>\n"
+                        f"━━━━━━━━━━━━━━━━━━\n"
+                        f"• <b>Trade:</b> #{ticket} ({pair})\n"
+                        f"• <b>Gain:</b> +{pips_gain:.1f} pips\n"
+                        f"• <b>New SL:</b> {be_sl:.5f} (Risk-Free Trade!)\n"
+                        f"━━━━━━━━━━━━━━━━━━"
+                    )
+
+            # 3. AI TREND REVERSAL AUTO-EXIT
+            opp = opportunities_dict.get(pair)
+            if opp and opp.get('status') == 'CONFIRMED' and not opp.get('is_hallucination', False):
+                ai_action = opp.get('action')
+                ai_conf = opp.get('confidence', 0.0) * 100
+                is_reversal = (pos_type == 0 and ai_action == "SELL") or (pos_type == 1 and ai_action == "BUY")
+
+                if is_reversal:
+                    close_type = mt5.ORDER_TYPE_SELL if pos_type == 0 else mt5.ORDER_TYPE_BUY
+                    close_price = sym_info.bid if pos_type == 0 else sym_info.ask
+                    close_req = {
+                        "action": mt5.TRADE_ACTION_DEAL,
+                        "position": ticket,
+                        "symbol": pair,
+                        "volume": pos.volume,
+                        "type": close_type,
+                        "price": close_price,
+                        "deviation": 20,
+                        "magic": MAGIC_NUMBER,
+                        "comment": "AI-ReversalExit",
+                        "type_time": mt5.ORDER_TIME_GTC,
+                        "type_filling": mt5.ORDER_FILLING_IOC,
+                    }
+                    c_res = mt5.order_send(close_req)
+                    if c_res and c_res.retcode == mt5.TRADE_RETCODE_DONE:
+                        print(f"🚨 [AI REVERSAL EXIT] Closed #{ticket} ({pair}) due to {ai_action} signal ({ai_conf:.1f}%)")
+                        self.notifier.send_message(
+                            f"🚨 <b>AI REVERSAL EXIT!</b>\n"
+                            f"━━━━━━━━━━━━━━━━━━\n"
+                            f"Closed position #{ticket} ({pair}) early:\n"
+                            f"• <b>Reason:</b> Model detected strong opposite {ai_action} ({ai_conf:.1f}%)\n"
+                            f"• <b>Closed at:</b> {close_price:.5f} | Profit: ${profit:.2f}\n"
+                            f"━━━━━━━━━━━━━━━━━━"
+                        )
+
     def run_1sec_loop(self):
         if not self.connect_mt5():
             print("[FATAL] MT5 connection failed. Exiting.")
@@ -273,6 +408,7 @@ class RealTime1SecBot:
         print("  [LIVE] REAL-TIME 1-SECOND MARKET ANALYSIS IS NOW RUNNING!")
         print("  • Engine: Institutional DoubleEnsemble (108 Quant Features)")
         print("  • Pairs: EURUSD, GBPUSD, USDJPY, AUDUSD, USDCAD, USDCHF, NZDUSD, XAUUSD")
+        print("  • Active AI Manager: Auto-Guard SL/TP, Break-Even Lock, Reversal Exit")
         print("  • Render Cloud AI: https://mt5-ai-model-service.onrender.com (SYNCED)")
         print("  • NOTE: If you click inside this window and see 'Select' in the title,")
         print("    Windows paused output. Simply press ENTER or ESC to resume scrolling.")
@@ -297,6 +433,10 @@ class RealTime1SecBot:
                 # Analyze all 8 pairs in local RAM (<400ms)
                 opportunities, actionable = self.analyze_market_locally(balance)
                 compute_time_ms = (time.time() - t0) * 1000
+
+                # Manage all positions (Auto SL/TP for manual trades, Break-Even, AI Reversal Exits)
+                opps_dict = {o['pair']: o for o in opportunities}
+                self.manage_all_positions(opps_dict)
 
                 # Print clean scrolling line every 3 scans (~3 seconds)
                 if scan_count % 3 == 0 or actionable:
