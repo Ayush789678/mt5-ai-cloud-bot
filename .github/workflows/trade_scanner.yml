@@ -44,7 +44,8 @@ jobs:
           while ($sw.Elapsed.TotalSeconds -lt $timeout) {
             $found = Get-ChildItem -Path "C:\Program Files" -Filter "terminal64.exe" -Recurse -ErrorAction SilentlyContinue
             if ($found) {
-              Write-Host "✓ MT5 Binary detected: $($found.FullName)"
+              Write-Host "MT5 Binary detected:"
+              Write-Host $found.FullName
               Start-Sleep -Seconds 5
               break
             }
@@ -57,7 +58,12 @@ jobs:
           
           $allFound = Get-ChildItem -Path "C:\Program Files" -Filter "terminal64.exe" -Recurse -ErrorAction SilentlyContinue
           Write-Host "Final Installed MT5 locations:"
-          $allFound | ForEach-Object { Write-Host "  -> $($_.FullName)" }
+          if ($allFound) {
+            $allFound | ForEach-Object { Write-Host $_.FullName }
+          } else {
+            Write-Host "No terminal64.exe found in Program Files yet."
+          }
+
 
 
 
