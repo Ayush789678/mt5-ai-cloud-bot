@@ -189,7 +189,8 @@ def scan_all_pairs(req: ScanRequest):
             continue
         try:
             df = parse_candles_to_df(candles)
-            res = engine.predict_opportunity(pair.upper(), req.timeframe.upper(), df)
+            pair_tf = "1H" if pair.upper() == "XAUUSD" else req.timeframe.upper()
+            res = engine.predict_opportunity(pair.upper(), pair_tf, df)
             
             p_win = float(res.get('confidence', 0.5))
             u_epi = float(res.get('u_epistemic', 0.0))

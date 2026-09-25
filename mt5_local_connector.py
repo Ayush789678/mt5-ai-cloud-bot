@@ -40,7 +40,7 @@ MT5_SERVER = os.getenv("MT5_SERVER", "Elefin-Trade")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "8643518675:AAG_T9rUW2c2SPM8K9jjBu5Iy6gplStWe_E")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "5336298229")
 
-PAIRS = ["EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "USDCAD", "USDCHF", "NZDUSD"]
+PAIRS = ["EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "USDCAD", "USDCHF", "NZDUSD", "XAUUSD"]
 TIMEFRAME = "15M"
 TIMEFRAME_MT5 = mt5.TIMEFRAME_M15
 
@@ -65,7 +65,7 @@ class LocalMT5Connector:
         print(f"Cloud AI Brain Endpoint: {self.api_url}")
         print(f"Target MT5 Account      : #{MT5_LOGIN} ({MT5_SERVER})")
         print(f"Active Pairs            : {', '.join(PAIRS)}")
-        print(f"Timeframe               : {TIMEFRAME}")
+        print(f"Timeframe               : 15M (Forex) / 1H (Gold)")
         print("=" * 65)
 
         # Attempt 1: Attach to running terminal
@@ -114,7 +114,8 @@ class LocalMT5Connector:
     def fetch_pair_candles(self, pair: str, count: int = 150) -> list:
         # Ensure symbol selected in Market Watch
         mt5.symbol_select(pair, True)
-        rates = mt5.copy_rates_from_pos(pair, TIMEFRAME_MT5, 0, count)
+        tf = mt5.TIMEFRAME_H1 if pair == "XAUUSD" else TIMEFRAME_MT5
+        rates = mt5.copy_rates_from_pos(pair, tf, 0, count)
         if rates is None or len(rates) < 50:
             return []
 
@@ -157,23 +158,39 @@ class LocalMT5Connector:
         digits = sym_info.digits
         point = sym_info.point
 
-        if action == "BUY":
-            order_type = mt5.ORDER_TYPE_BUY
-            price = tick.ask
-            # Use model recommended TP/SL or 20/30 pips dynamic
-            sl_pips = 30 * (point * 10 if digits in (3, 5) else point)
-            tp_pips = 20 * (point * 10 if digits in (3, 5) else point)
-            sl = round(price - sl_pips, digits)
-            tp = round(price + tp_pips, digits)
-        elif action == "SELL":
-            order_type = mt5.ORDER_TYPE_SELL
-            price = tick.bid
-            sl_pips = 30 * (point * 10 if digits in (3, 5) else point)
-            tp_pips = 20 * (point * 10 if digits in (3, 5) else point)
-            sl = round(price + sl_pips, digits)
-            tp = round(price - tp_pips, digits)
+        if pair == "XAUUSD":
+            lot = 0.01  # Strict defensive lot size for Gold on small accounts
+            sl_dist = 6.00  # $6.00 stop loss distance
+            tp_dist = 4.00  # $4.00 take profit ($4.00 profit on 0.01 lot)
+            if action == "BUY":
+                order_type = mt5.ORDER_TYPE_BUY
+                price = tick.ask
+                sl = round(price - sl_dist, digits)
+                tp = round(price + tp_dist, digits)
+            elif action == "SELL":
+                order_type = mt5.ORDER_TYPE_SELL
+                price = tick.bid
+                sl = round(price + sl_dist, digits)
+                tp = round(price - tp_dist, digits)
+            else:
+                return
         else:
-            return
+            if action == "BUY":
+                order_type = mt5.ORDER_TYPE_BUY
+                price = tick.ask
+                sl_pips = 30 * (point * 10 if digits in (3, 5) else point)
+                tp_pips = 20 * (point * 10 if digits in (3, 5) else point)
+                sl = round(price - sl_pips, digits)
+                tp = round(price + tp_pips, digits)
+            elif action == "SELL":
+                order_type = mt5.ORDER_TYPE_SELL
+                price = tick.bid
+                sl_pips = 30 * (point * 10 if digits in (3, 5) else point)
+                tp_pips = 20 * (point * 10 if digits in (3, 5) else point)
+                sl = round(price + sl_pips, digits)
+                tp = round(price - tp_pips, digits)
+            else:
+                return
 
         request = {
             "action": mt5.TRADE_ACTION_DEAL,
