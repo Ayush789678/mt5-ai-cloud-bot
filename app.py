@@ -147,7 +147,7 @@ def predict_single_pair(req: PredictRequest):
         raise HTTPException(status_code=400, detail=f"Insufficient candles provided ({len(req.candles)} < 50 required for TA computation)")
 
     df = parse_candles_to_df(req.candles)
-    res = engine.evaluate_opportunity(df, req.pair.upper(), req.timeframe.upper())
+    res = engine.predict_opportunity(req.pair.upper(), req.timeframe.upper(), df)
 
     # Calculate dynamic lot size and conviction tier
     p_win = res.get('win_probability', 0.5)
@@ -186,7 +186,7 @@ def scan_all_pairs(req: ScanRequest):
             continue
         try:
             df = parse_candles_to_df(candles)
-            res = engine.evaluate_opportunity(df, pair.upper(), req.timeframe.upper())
+            res = engine.predict_opportunity(pair.upper(), req.timeframe.upper(), df)
             if res.get('status') == 'SUCCESS':
                 p_win = res.get('win_probability', 0.5)
                 u_epi = res.get('epistemic_uncertainty', 0.0)
