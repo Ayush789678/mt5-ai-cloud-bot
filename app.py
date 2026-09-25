@@ -149,9 +149,8 @@ def predict_single_pair(req: PredictRequest):
     df = parse_candles_to_df(req.candles)
     res = engine.predict_opportunity(req.pair.upper(), req.timeframe.upper(), df)
 
-    # Calculate dynamic lot size and conviction tier
-    p_win = res.get('win_probability', 0.5)
-    u_epi = res.get('epistemic_uncertainty', 0.0)
+    p_win = float(res.get('confidence', 0.5))
+    u_epi = float(res.get('u_epistemic', 0.0))
     conv = p_win - 0.5 * u_epi
     
     if conv >= 0.57 and p_win >= 0.62:
@@ -171,6 +170,10 @@ def predict_single_pair(req: PredictRequest):
     res['recommended_lot'] = lot
     res['conviction_tier'] = tier
     res['effective_conviction'] = round(conv, 4)
+    res['win_probability'] = p_win
+    res['epistemic_uncertainty'] = u_epi
+    res['is_hallucination'] = u_epi > 0.20
+    res['confidence_passed'] = res.get('status') == 'CONFIRMED'
     return res
 
 @app.post("/scan", tags=["Inference"])
@@ -187,34 +190,38 @@ def scan_all_pairs(req: ScanRequest):
         try:
             df = parse_candles_to_df(candles)
             res = engine.predict_opportunity(pair.upper(), req.timeframe.upper(), df)
-            if res.get('status') == 'SUCCESS':
-                p_win = res.get('win_probability', 0.5)
-                u_epi = res.get('epistemic_uncertainty', 0.0)
-                conv = p_win - 0.5 * u_epi
+            
+            p_win = float(res.get('confidence', 0.5))
+            u_epi = float(res.get('u_epistemic', 0.0))
+            conv = p_win - 0.5 * u_epi
 
-                if conv >= 0.57 and p_win >= 0.62:
-                    lot = 0.03
-                    tier = "ULTRA"
-                elif conv >= 0.52:
-                    lot = 0.02
-                    tier = "STANDARD"
-                else:
-                    lot = 0.01
-                    tier = "DEFENSIVE"
+            if conv >= 0.57 and p_win >= 0.62:
+                lot = 0.03
+                tier = "ULTRA"
+            elif conv >= 0.52:
+                lot = 0.02
+                tier = "STANDARD"
+            else:
+                lot = 0.01
+                tier = "DEFENSIVE"
 
-                bal_ratio = max(0.5, (req.account_balance or 100.0) / 100.0)
-                lot = round(lot * bal_ratio, 2)
-                lot = max(0.01, min(lot, 0.05))
+            bal_ratio = max(0.5, (req.account_balance or 100.0) / 100.0)
+            lot = round(lot * bal_ratio, 2)
+            lot = max(0.01, min(lot, 0.05))
 
-                res['recommended_lot'] = lot
-                res['conviction_tier'] = tier
-                res['effective_conviction'] = round(conv, 4)
-                opportunities.append(res)
+            res['recommended_lot'] = lot
+            res['conviction_tier'] = tier
+            res['effective_conviction'] = round(conv, 4)
+            res['win_probability'] = p_win
+            res['epistemic_uncertainty'] = u_epi
+            res['is_hallucination'] = u_epi > 0.20
+            res['confidence_passed'] = res.get('status') == 'CONFIRMED'
+            opportunities.append(res)
         except Exception as e:
             print(f"[ERROR] Failed scanning pair {pair}: {e}")
 
-    # Sort opportunities: passed confidence first, then by highest win probability
-    opportunities.sort(key=lambda x: (x.get('confidence_passed', False), x.get('win_probability', 0.0)), reverse=True)
+    # Sort opportunities: confirmed first, then by highest confidence
+    opportunities.sort(key=lambda x: (x.get('confidence_passed', False), x.get('confidence', 0.0)), reverse=True)
 
     actionable = [o for o in opportunities if o.get('confidence_passed', False) and not o.get('is_hallucination', False) and o.get('action') in ('BUY', 'SELL')]
 
