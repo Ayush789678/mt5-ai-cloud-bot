@@ -7,3 +7,5 @@ __pycache__/
 Thumbs.db
 elefin5setup.exe
 mt5setup.exe
+.venv/
+venv/
