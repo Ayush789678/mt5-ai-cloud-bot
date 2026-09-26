@@ -1,9 +1,9 @@
 import MetaTrader5 as mt5
 import requests
 import time
-from mt5_local_connector import LocalMT5Connector, PAIRS, TIMEFRAME
+from mt5_local_connector import RealTime1SecBot, PAIRS, TIMEFRAME
 
-c = LocalMT5Connector('https://mt5-ai-model-service.onrender.com')
+c = RealTime1SecBot('https://mt5-ai-model-service.onrender.com')
 mt5.initialize()
 
 print('=' * 75)

@@ -18,12 +18,13 @@ from pydantic import BaseModel, Field
 
 # Ensure GPUDoubleEnsemble is registered in __main__ for unpickling
 class GPUDoubleEnsemble:
-    def __init__(self, random_state=42, max_epistemic_disagreement=0.20):
+    def __init__(self, random_state=42, max_epistemic_disagreement=0.08):
         self.random_state = random_state
         self.max_epistemic_disagreement = max_epistemic_disagreement
         self.xgb_base = None
         self.xgb_reweighted = None
         self.cat_model = None
+        self.calibrator = None
         self.weights = [0.50, 0.50]
         self.feature_names = None
         self.pair_thresholds = {}
@@ -34,6 +35,11 @@ class GPUDoubleEnsemble:
         p_cat = self.cat_model.predict_proba(X_input)[:, 1]
         u_epistemic = np.abs(p_xgb - p_cat)
         p_blend = self.weights[0] * p_xgb + self.weights[1] * p_cat
+        if hasattr(self, 'calibrator') and self.calibrator is not None:
+            try:
+                p_blend = self.calibrator.predict(p_blend)
+            except Exception:
+                pass
         is_hallucination = u_epistemic > self.max_epistemic_disagreement
         return p_blend, u_epistemic, is_hallucination
 
@@ -41,7 +47,7 @@ class GPUDoubleEnsemble:
         p_blend, _, _ = self.predict_with_uncertainty(X_input)
         return np.column_stack([1.0 - p_blend, p_blend])
 
-    def predict(self, X_input, threshold=0.60):
+    def predict(self, X_input, threshold=0.65):
         p_blend, _, is_hal = self.predict_with_uncertainty(X_input)
         return np.where((p_blend > threshold) & (~is_hal), 1, 0)
 
