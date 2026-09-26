@@ -394,20 +394,36 @@ class UnifiedTradingBotEngine:
 
         req_thresh = self.pair_thresholds.get(pair, self.universal_threshold)
 
-        # Risk & Kelly (Option C: Positive 1:1.5 - 1:2 RR)
-        b = 1.35 / 0.80 # odds ratio: 1.6875 (Positive Risk-Reward)
+        # Risk & Kelly (Strict 1:2 Positive Risk-to-Reward)
+        b = 2.0  # Odds ratio: 2.0 (Strict 1:2 Risk-to-Reward)
         q = 1.0 - p_win
         kelly = max(0.0, (b * p_win - q) / b) * 0.50 # half-kelly
         risk_pct = min(kelly, 0.05) * 100.0
 
+        # Dynamic ATR-based 1:2 Barriers
+        is_gold = (pair == "XAUUSD")
+        if is_gold:
+            sl_dist = max(3.50, min(6.00, float(atr)))
+            tp_dist = sl_dist * 2.0
+            sl_pips = sl_dist * 10.0
+            tp_pips = tp_dist * 10.0
+            atr_pips = float(atr) * 10.0
+        else:
+            pip_unit = 0.01 if "JPY" in pair else 0.00010
+            atr_pips = float(atr) / pip_unit if pip_unit > 0 else 14.0
+            sl_pips = max(10.0, min(22.0, atr_pips))
+            tp_pips = sl_pips * 2.0  # Exact 1:2 Risk-to-Reward
+            sl_dist = sl_pips * pip_unit
+            tp_dist = tp_pips * pip_unit
+
         if best_sig == 1:
             action = "BUY"
-            tp = price + 1.35 * atr
-            sl = price - 0.80 * atr
+            tp = price + tp_dist
+            sl = price - sl_dist
         elif best_sig == -1:
             action = "SELL"
-            tp = price - 1.35 * atr
-            sl = price + 0.80 * atr
+            tp = price - tp_dist
+            sl = price + sl_dist
         else:
             action = "NEUTRAL"
             tp = price; sl = price
@@ -439,6 +455,11 @@ class UnifiedTradingBotEngine:
             'confluence': confluence,
             'take_profit': tp,
             'stop_loss': sl,
+            'sl_dist': sl_dist,
+            'tp_dist': tp_dist,
+            'sl_pips': sl_pips,
+            'tp_pips': tp_pips,
+            'atr_pips': atr_pips,
             'half_kelly_risk_pct': risk_pct,
             'u_epistemic': u_val,
             'latency_ms': latency_ms,

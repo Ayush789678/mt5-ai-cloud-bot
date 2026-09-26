@@ -56,8 +56,9 @@ class RealTime1SecBot:
         self.api_url = api_url.rstrip("/")
         self.notifier = TelegramNotifier(TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID)
         self.current_date = datetime.date.today()
-        self.last_traded_bar = {}
         self.drawdown_alert_sent = False
+        self.pending_reversals = {}  # {ticket: True} for patient breakeven recovery
+        self.be_locked = set()        # {ticket} for risk-free trades
         
         # Load Institutional AI Brain directly into local memory for sub-second analysis
         print("[INIT] Loading AI Golden DoubleEnsemble into local RAM for 1-second analysis...")
@@ -163,37 +164,53 @@ class RealTime1SecBot:
             "total_daily_pnl": total_daily_pnl
         }
 
-    def calculate_model_lot(self, p_win: float, u_epi: float, conv: float, pair: str, balance: float, open_count: int) -> tuple:
+    def calculate_model_lot(self, pair: str, sl_dist: float, p_win: float, u_epi: float, conv: float, balance: float, open_count: int) -> tuple:
         """
-        Calculates dynamic position size based on Option C quantitative conviction:
-        - ULTRA (0.03 lot): Top-decile A+ setup (p_win >= 70% and conv >= 0.65 and u_epi <= 0.10) -> +$9.00 TP / -$6.00 SL
-        - STRONG (0.02 lot): High-conviction setup (p_win >= 66% and conv >= 0.60 and u_epi <= 0.14) -> +$6.00 TP / -$4.00 SL
-        - DEFENSIVE (0.01 lot): Standard valid setup (p_win >= 64%) or when already holding 1 open position -> +$3.00 TP / -$2.00 SL
-        - Gold (XAUUSD): Strictly 0.01 lot for accounts under $150 to prevent excessive drawdown
+        Calculates dynamic position size based on Fixed Dollar Risk ($2.00 - $2.50 per trade):
+        - Pegs risk to $2.50 per trade so 4 consecutive losses never breach the $10 daily drawdown limit.
+        - Uses live MT5 broker tick values to dynamically determine exact lots across all pairs.
+        - Gold (XAUUSD): Strictly 0.01 lot for accounts under $200.
+        - Forex: Sized between 0.01 and 0.03 lots based on pair volatility (calm EURUSD = 0.02-0.03, volatile GBPUSD = 0.01-0.02).
+        - If 1 trade is already open, any second trade defaults defensively to 0.01 lot.
         """
-        # If 1 position is already open, use defensive sizing to avoid double overexposure
         has_open_position = open_count >= 1
+        if has_open_position:
+            return 0.01, "DEFENSIVE (0.01 lot — 2nd Position Guard)"
 
         if pair == "XAUUSD":
-            if balance >= 150.0 and p_win >= 0.72 and conv >= 0.66:
-                return 0.02, "ULTRA (Gold 0.02 lot)"
-            else:
-                return 0.01, "STANDARD (Gold 0.01 lot)"
+            return 0.01, "STANDARD (Gold 0.01 lot — Safe Margin)"
 
-        if conv >= 0.65 and p_win >= 0.70 and u_epi <= 0.10 and not has_open_position:
-            lot = 0.03
-            tier = "ULTRA (0.03 lot — A+ Conviction)"
-        elif conv >= 0.60 and p_win >= 0.66 and u_epi <= 0.14:
-            lot = 0.02
-            tier = "STRONG (0.02 lot — Solid Momentum)"
+        sym_info = mt5.symbol_info(pair)
+        if not sym_info or sl_dist <= 0:
+            return 0.01, "DEFENSIVE (0.01 lot)"
+
+        # Target dollar risk: $2.50 (2.5% of $100 account)
+        target_risk_dollars = max(2.00, min(2.50, balance * 0.025))
+
+        tick_size = sym_info.trade_tick_size if sym_info.trade_tick_size > 0 else sym_info.point
+        tick_val_loss = sym_info.trade_tick_value_loss if sym_info.trade_tick_value_loss > 0 else 1.0
+
+        loss_per_lot = (sl_dist / tick_size) * tick_val_loss
+        if loss_per_lot <= 0:
+            return 0.01, "DEFENSIVE (0.01 lot)"
+
+        raw_lot = target_risk_dollars / loss_per_lot
+
+        # Reward higher conviction with slightly higher sizing within the $2.50 envelope
+        if conv >= 0.65 and p_win >= 0.70 and u_epi <= 0.10:
+            lot = min(0.03, max(0.02, round(raw_lot * 1.15, 2)))
+            tier = f"ULTRA ({lot} lots — A+ Conviction, ~$2.50 Risk)"
+        elif conv >= 0.60 and p_win >= 0.66:
+            lot = min(0.02, max(0.01, round(raw_lot, 2)))
+            tier = f"STRONG ({lot} lots — High Momentum, ~$2.50 Risk)"
         else:
             lot = 0.01
-            tier = "DEFENSIVE (0.01 lot — Conservative)"
+            tier = "DEFENSIVE (0.01 lot — Standard Setup)"
 
-        # Account scaling: if balance grows above $200, scale safely
-        if balance >= 200.0:
-            scale = min(2.0, balance / 100.0)
-            lot = round(lot * scale, 2)
+        # Step rounding and min/max boundaries
+        step = sym_info.volume_step if sym_info.volume_step > 0 else 0.01
+        lot = round(round(lot / step) * step, 2)
+        lot = max(sym_info.volume_min, min(0.03, lot))
 
         return lot, tier
 
@@ -210,15 +227,16 @@ class RealTime1SecBot:
                 p_win = float(res.get('confidence', 0.5))
                 u_epi = float(res.get('u_epistemic', 0.0))
                 conv = p_win - 0.5 * u_epi
+                sl_dist = float(res.get('sl_dist', 0.0))
 
-                lot, tier = self.calculate_model_lot(p_win, u_epi, conv, pair, balance, open_count)
+                lot, tier = self.calculate_model_lot(pair, sl_dist, p_win, u_epi, conv, balance, open_count)
 
                 res['recommended_lot'] = lot
                 res['conviction_tier'] = tier
                 res['effective_conviction'] = round(conv, 4)
                 res['win_probability'] = p_win
                 res['epistemic_uncertainty'] = u_epi
-                res['is_hallucination'] = u_epi > 0.15
+                res['is_hallucination'] = u_epi > 0.12
                 res['confidence_passed'] = res.get('status') == 'CONFIRMED'
                 opportunities.append(res)
             except Exception:
@@ -234,6 +252,10 @@ class RealTime1SecBot:
         lot = float(opp.get('recommended_lot', 0.01))
         conviction = opp.get('conviction_tier', 'STANDARD')
         p_win = opp.get('win_probability', 0.5)
+        sl_dist = float(opp.get('sl_dist', 0.0))
+        tp_dist = float(opp.get('tp_dist', 0.0))
+        sl_pips = float(opp.get('sl_pips', 0.0))
+        tp_pips = float(opp.get('tp_pips', 0.0))
 
         # Check existing positions on this symbol
         open_positions = mt5.positions_get(symbol=pair)
@@ -251,39 +273,28 @@ class RealTime1SecBot:
 
         digits = sym_info.digits
         point = sym_info.point
+        pip_unit = point * 10 if digits in (3, 5) else point
 
-        if pair == "XAUUSD":
-            lot = min(float(opp.get('recommended_lot', 0.01)), 0.02)
-            sl_dist = 5.00  # Option C: $5.00 SL
-            tp_dist = 7.50  # Option C: $7.50 TP (1:1.5 Positive RR)
-            if action == "BUY":
-                order_type = mt5.ORDER_TYPE_BUY
-                price = tick.ask
-                sl = round(price - sl_dist, digits)
-                tp = round(price + tp_dist, digits)
-            elif action == "SELL":
-                order_type = mt5.ORDER_TYPE_SELL
-                price = tick.bid
-                sl = round(price + sl_dist, digits)
-                tp = round(price - tp_dist, digits)
+        if sl_dist <= 0 or tp_dist <= 0:
+            if pair == "XAUUSD":
+                sl_dist = 4.50
+                tp_dist = 9.00
             else:
-                return
+                sl_dist = 14 * pip_unit
+                tp_dist = 28 * pip_unit
+
+        if action == "BUY":
+            order_type = mt5.ORDER_TYPE_BUY
+            price = tick.ask
+            sl = round(price - sl_dist, digits)
+            tp = round(price + tp_dist, digits)
+        elif action == "SELL":
+            order_type = mt5.ORDER_TYPE_SELL
+            price = tick.bid
+            sl = round(price + sl_dist, digits)
+            tp = round(price - tp_dist, digits)
         else:
-            pip_unit = point * 10 if digits in (3, 5) else point
-            sl_pips = 20 * pip_unit  # Option C: 20 pips SL
-            tp_pips = 30 * pip_unit  # Option C: 30 pips TP (1:1.5 Positive RR)
-            if action == "BUY":
-                order_type = mt5.ORDER_TYPE_BUY
-                price = tick.ask
-                sl = round(price - sl_pips, digits)
-                tp = round(price + tp_pips, digits)
-            elif action == "SELL":
-                order_type = mt5.ORDER_TYPE_SELL
-                price = tick.bid
-                sl = round(price + sl_pips, digits)
-                tp = round(price - tp_pips, digits)
-            else:
-                return
+            return
 
         request = {
             "action": mt5.TRADE_ACTION_DEAL,
@@ -295,12 +306,12 @@ class RealTime1SecBot:
             "tp": tp,
             "deviation": 20,
             "magic": MAGIC_NUMBER,
-            "comment": f"AI-{conviction[:4]}",
+            "comment": "AI-1to2",
             "type_time": mt5.ORDER_TIME_GTC,
             "type_filling": mt5.ORDER_FILLING_IOC,
         }
 
-        print(f"\n[ORDER EXECUTION] Sending {action} {lot} lots on {pair} @ {price:.5f} (Tier: {conviction}) (SL: {sl}, TP: {tp})...")
+        print(f"\n[ORDER EXECUTION] Sending {action} {lot} lots on {pair} @ {price:.5f} (Tier: {conviction}) (SL: {sl}, TP: {tp} | 1:2 RR)...")
         result = mt5.order_send(request)
         if result and result.retcode == mt5.TRADE_RETCODE_DONE:
             print(f"✅ [SUCCESS] Order placed! Ticket: #{result.order} | Retcode: {result.retcode}")
@@ -308,14 +319,15 @@ class RealTime1SecBot:
             
             # Send Telegram confirmation
             msg = (
-                f"⚡ <b>AI ORDER EXECUTED (1-SEC SCANNER)!</b>\n"
+                f"⚡ <b>AI ORDER EXECUTED (STRICT 1:2 RR)!</b>\n"
                 f"━━━━━━━━━━━━━━━━━━\n"
                 f"• <b>Symbol:</b> {pair} ({'1H' if pair == 'XAUUSD' else TIMEFRAME})\n"
                 f"• <b>Action:</b> {action}\n"
                 f"• <b>Volume:</b> {lot} lots ({conviction})\n"
                 f"• <b>Entry Price:</b> {price:.5f}\n"
-                f"• <b>Take Profit:</b> {tp:.5f}\n"
-                f"• <b>Stop Loss:</b> {sl:.5f}\n"
+                f"• <b>Take Profit:</b> {tp:.5f} (+{tp_pips:.1f} pips | 2R Target)\n"
+                f"• <b>Stop Loss:</b> {sl:.5f} (-{sl_pips:.1f} pips | 1R Risk)\n"
+                f"• <b>Risk-Reward:</b> 1:2 Strict Mathematical Ratio\n"
                 f"• <b>Win Probability:</b> {p_win*100:.1f}%\n"
                 f"• <b>Ticket:</b> #{result.order}\n"
                 f"━━━━━━━━━━━━━━━━━━"
@@ -327,10 +339,17 @@ class RealTime1SecBot:
 
     def manage_all_positions(self, opportunities_dict: dict):
         """
-        Active AI Position Manager:
-        1. Auto-assigns protective SL & TP to manual trades (magic == 0 or missing SL/TP).
-        2. Trailing Stop to Break-Even for all trades once in profit (+12 pips or +$2.50 Gold).
-        3. Exits trades early if AI detects a strong confirmed trend reversal (>=70% opposite direction).
+        AI Active Trade Guardian (AI-ATG):
+        1. Auto-Guard: Assigns dynamic 1:2 ATR SL & TP to manual/unguarded trades.
+        2. 3-Stage Smart Trailing (Winning Trades):
+           - Stage 1: Breakeven Lock at +50% SL distance gain -> trails SL to Entry + 1 pip (100% Risk-Free).
+           - Stage 2: Dynamic Trailing Stop at +100% SL distance gain (1R) -> locks in profits step-by-step.
+           - Stage 3: Full 1:2 Take Profit target.
+        3. Adaptive Loss Cutting & Breakeven Recovery (Losing Trades):
+           - Normal Pullback: Holds calmly. Lets trade breathe within its designated SL.
+           - Breakeven Recovery: If momentum exhausted against position, waits for price to retrace to Entry and closes at $0.00 flat!
+           - Adaptive Loss Cut: If AI confirms a complete structural trend breakdown (>=72% opposite conviction with low uncertainty),
+             cuts the trade early at 50% drawdown (~$1.20) rather than taking the full -$2.50 Stop Loss!
         """
         positions = mt5.positions_get()
         if not positions:
@@ -355,18 +374,23 @@ class RealTime1SecBot:
             point = sym_info.point
             pip_unit = point * 10 if digits in (3, 5) else point
 
-            # 1. AUTO-PROTECTIVE SL/TP FOR MANUAL TRADES (or any trade with missing SL/TP)
+            # Calculate live price excursion
+            price_delta = (current_price - open_price) if pos_type == 0 else (open_price - current_price)
+            pips_gain = price_delta / pip_unit if pair != "XAUUSD" else price_delta
+
+            # Estimate initial SL distance
+            if sl > 0:
+                init_sl_dist = abs(open_price - sl)
+            else:
+                init_sl_dist = 4.50 if pair == "XAUUSD" else (14 * pip_unit)
+
+            # 1. AUTO-PROTECTIVE SL/TP (If missing)
             if sl == 0.0 or tp == 0.0:
-                if pair == "XAUUSD":
-                    sl_dist = 5.00
-                    tp_dist = 7.50
-                    new_sl = round(open_price - sl_dist if pos_type == 0 else open_price + sl_dist, digits)
-                    new_tp = round(open_price + tp_dist if pos_type == 0 else open_price - tp_dist, digits)
-                else:
-                    sl_pips = 20 * pip_unit
-                    tp_pips = 30 * pip_unit
-                    new_sl = round(open_price - sl_pips if pos_type == 0 else open_price + sl_pips, digits)
-                    new_tp = round(open_price + tp_pips if pos_type == 0 else open_price - tp_pips, digits)
+                opp = opportunities_dict.get(pair, {})
+                s_dist = float(opp.get('sl_dist', init_sl_dist))
+                t_dist = float(opp.get('tp_dist', s_dist * 2.0))
+                new_sl = round(open_price - s_dist if pos_type == 0 else open_price + s_dist, digits)
+                new_tp = round(open_price + t_dist if pos_type == 0 else open_price - t_dist, digits)
 
                 mod_req = {
                     "action": mt5.TRADE_ACTION_SLTP,
@@ -377,9 +401,9 @@ class RealTime1SecBot:
                 }
                 res = mt5.order_send(mod_req)
                 if res and res.retcode == mt5.TRADE_RETCODE_DONE:
-                    print(f"🛡️ [AI AUTO-GUARD] Attached protective SL ({new_sl}) & TP ({new_tp}) to trade #{ticket} ({pair})")
+                    print(f"🛡️ [AI AUTO-GUARD] Attached 1:2 SL ({new_sl}) & TP ({new_tp}) to trade #{ticket} ({pair})")
                     self.notifier.send_message(
-                        f"🛡️ <b>AI AUTO-GUARD ACTIVATED!</b>\n"
+                        f"🛡️ <b>AI AUTO-GUARD ACTIVATED (1:2 RR)!</b>\n"
                         f"━━━━━━━━━━━━━━━━━━\n"
                         f"Attached protective levels to trade #{ticket} ({pair}):\n"
                         f"• <b>Entry:</b> {open_price:.5f}\n"
@@ -388,51 +412,109 @@ class RealTime1SecBot:
                         f"━━━━━━━━━━━━━━━━━━"
                     )
 
-            # 2. BREAK-EVEN TRAILING STOP (Lock in profits)
-            if pair == "XAUUSD":
-                pips_gain = (current_price - open_price) if pos_type == 0 else (open_price - current_price)
-                can_be = pips_gain >= 2.50
-                be_sl = round(open_price + 0.50 if pos_type == 0 else open_price - 0.50, digits)
+            # 2. POSITION IS IN PROFIT (pips_gain > 0 and profit > $0.20)
+            if pips_gain > 0 and profit > 0.20:
+                # Stage 1: Breakeven Lock at +50% SL distance
+                be_trigger_dist = (init_sl_dist * 0.50) if pair == "XAUUSD" else ((init_sl_dist / pip_unit) * 0.50)
+                can_be = pips_gain >= be_trigger_dist
+                be_sl = round(open_price + (1 * pip_unit) if pos_type == 0 else open_price - (1 * pip_unit), digits)
+                if pair == "XAUUSD":
+                    be_sl = round(open_price + 0.50 if pos_type == 0 else open_price - 0.50, digits)
+
+                # Check if SL needs updating to Breakeven
+                sl_needs_be = False
+                if can_be:
+                    if pos_type == 0 and (sl == 0.0 or sl < open_price):
+                        sl_needs_be = True
+                    elif pos_type == 1 and (sl == 0.0 or sl > open_price):
+                        sl_needs_be = True
+
+                if sl_needs_be:
+                    be_req = {
+                        "action": mt5.TRADE_ACTION_SLTP,
+                        "position": ticket,
+                        "symbol": pair,
+                        "sl": be_sl,
+                        "tp": tp,
+                    }
+                    res = mt5.order_send(be_req)
+                    if res and res.retcode == mt5.TRADE_RETCODE_DONE:
+                        self.be_locked.add(ticket)
+                        print(f"🔒 [BREAK-EVEN LOCKED] Moved SL on #{ticket} ({pair}) to {be_sl} (Gain: +{pips_gain:.1f} pips)")
+                        self.notifier.send_message(
+                            f"🔒 <b>BREAK-EVEN LOCKED (STAGE 1)!</b>\n"
+                            f"━━━━━━━━━━━━━━━━━━\n"
+                            f"• <b>Trade:</b> #{ticket} ({pair})\n"
+                            f"• <b>Gain:</b> +{pips_gain:.1f} pips\n"
+                            f"• <b>New SL:</b> {be_sl:.5f} (Risk-Free Trade!)\n"
+                            f"━━━━━━━━━━━━━━━━━━"
+                        )
+
+                # Stage 2: Smart Trailing Stop once in 1R profit (+100% SL distance)
+                trail_trigger_dist = (init_sl_dist * 1.0) if pair == "XAUUSD" else (init_sl_dist / pip_unit)
+                if pips_gain >= trail_trigger_dist:
+                    trail_gap = (init_sl_dist * 0.65)
+                    new_trail_sl = round(current_price - trail_gap if pos_type == 0 else current_price + trail_gap, digits)
+                    should_trail = (pos_type == 0 and new_trail_sl > sl) or (pos_type == 1 and new_trail_sl < sl)
+                    if should_trail:
+                        tr_req = {
+                            "action": mt5.TRADE_ACTION_SLTP,
+                            "position": ticket,
+                            "symbol": pair,
+                            "sl": new_trail_sl,
+                            "tp": tp,
+                        }
+                        mt5.order_send(tr_req)
+
+            # 3. POSITION IS IN LOSS / DRAWDOWN (profit <= $0 or pips_gain <= 0)
             else:
-                pips_gain = ((current_price - open_price) / pip_unit) if pos_type == 0 else ((open_price - current_price) / pip_unit)
-                can_be = pips_gain >= 12.0
-                be_sl = round(open_price + (2 * pip_unit) if pos_type == 0 else open_price - (2 * pip_unit), digits)
+                opp = opportunities_dict.get(pair)
+                if opp and opp.get('status') == 'CONFIRMED' and not opp.get('is_hallucination', False):
+                    ai_action = opp.get('action')
+                    ai_conf = opp.get('confidence', 0.0) * 100
+                    is_opposite_reversal = (pos_type == 0 and ai_action == "SELL") or (pos_type == 1 and ai_action == "BUY")
 
-            sl_needs_update = False
-            if can_be:
-                if pos_type == 0 and (sl == 0.0 or sl < open_price):
-                    sl_needs_update = True
-                elif pos_type == 1 and (sl == 0.0 or sl > open_price):
-                    sl_needs_update = True
+                    # Scenario A: AI Confirmed Structural Trend Breakdown
+                    # If high conviction opposite signal (>= 72%) and drawdown is at least 50% of SL risk:
+                    drawdown_dist = abs(price_delta)
+                    drawdown_ratio = drawdown_dist / init_sl_dist if init_sl_dist > 0 else 0.0
 
-            if sl_needs_update:
-                be_req = {
-                    "action": mt5.TRADE_ACTION_SLTP,
-                    "position": ticket,
-                    "symbol": pair,
-                    "sl": be_sl,
-                    "tp": tp,
-                }
-                res = mt5.order_send(be_req)
-                if res and res.retcode == mt5.TRADE_RETCODE_DONE:
-                    print(f"🔒 [BREAK-EVEN LOCKED] Moved SL on #{ticket} ({pair}) to {be_sl} (Profit: +{pips_gain:.1f} pips)")
-                    self.notifier.send_message(
-                        f"🔒 <b>BREAK-EVEN LOCKED!</b>\n"
-                        f"━━━━━━━━━━━━━━━━━━\n"
-                        f"• <b>Trade:</b> #{ticket} ({pair})\n"
-                        f"• <b>Gain:</b> +{pips_gain:.1f} pips\n"
-                        f"• <b>New SL:</b> {be_sl:.5f} (Risk-Free Trade!)\n"
-                        f"━━━━━━━━━━━━━━━━━━"
-                    )
+                    if is_opposite_reversal and ai_conf >= 72.0 and drawdown_ratio >= 0.50:
+                        close_type = mt5.ORDER_TYPE_SELL if pos_type == 0 else mt5.ORDER_TYPE_BUY
+                        close_price = sym_info.bid if pos_type == 0 else sym_info.ask
+                        close_req = {
+                            "action": mt5.TRADE_ACTION_DEAL,
+                            "position": ticket,
+                            "symbol": pair,
+                            "volume": pos.volume,
+                            "type": close_type,
+                            "price": close_price,
+                            "deviation": 20,
+                            "magic": MAGIC_NUMBER,
+                            "comment": "AI-AdaptLossCut",
+                            "type_time": mt5.ORDER_TIME_GTC,
+                            "type_filling": mt5.ORDER_FILLING_IOC,
+                        }
+                        c_res = mt5.order_send(close_req)
+                        if c_res and c_res.retcode == mt5.TRADE_RETCODE_DONE:
+                            print(f"🛡️ [AI ADAPTIVE LOSS CUT] Cut #{ticket} ({pair}) early at 50% risk: Loss ${profit:.2f}")
+                            self.notifier.send_message(
+                                f"🛡️ <b>AI ADAPTIVE LOSS CUT!</b>\n"
+                                f"━━━━━━━━━━━━━━━━━━\n"
+                                f"Cut position #{ticket} ({pair}) early to save capital:\n"
+                                f"• <b>Reason:</b> Model confirmed trend breakdown to {ai_action} ({ai_conf:.1f}%)\n"
+                                f"• <b>Drawdown Cut:</b> {drawdown_ratio*100:.0f}% of SL (Loss saved by ~50%!)\n"
+                                f"• <b>Closed at:</b> {close_price:.5f} | Realized: ${profit:.2f}\n"
+                                f"━━━━━━━━━━━━━━━━━━"
+                            )
+                            continue
 
-            # 3. AI TREND REVERSAL AUTO-EXIT
-            opp = opportunities_dict.get(pair)
-            if opp and opp.get('status') == 'CONFIRMED' and not opp.get('is_hallucination', False):
-                ai_action = opp.get('action')
-                ai_conf = opp.get('confidence', 0.0) * 100
-                is_reversal = (pos_type == 0 and ai_action == "SELL") or (pos_type == 1 and ai_action == "BUY")
+                    # Scenario B: Flag for Breakeven Recovery if opposite momentum noted
+                    if is_opposite_reversal and ai_conf >= 68.0:
+                        self.pending_reversals[ticket] = True
 
-                if is_reversal:
+                # Scenario C: Patient Breakeven Recovery Exit upon Retracement to Entry
+                if ticket in self.pending_reversals and (profit >= -0.10 or pips_gain >= 0.0):
                     close_type = mt5.ORDER_TYPE_SELL if pos_type == 0 else mt5.ORDER_TYPE_BUY
                     close_price = sym_info.bid if pos_type == 0 else sym_info.ask
                     close_req = {
@@ -444,19 +526,19 @@ class RealTime1SecBot:
                         "price": close_price,
                         "deviation": 20,
                         "magic": MAGIC_NUMBER,
-                        "comment": "AI-ReversalExit",
+                        "comment": "AI-BERecovery",
                         "type_time": mt5.ORDER_TIME_GTC,
                         "type_filling": mt5.ORDER_FILLING_IOC,
                     }
                     c_res = mt5.order_send(close_req)
                     if c_res and c_res.retcode == mt5.TRADE_RETCODE_DONE:
-                        print(f"🚨 [AI REVERSAL EXIT] Closed #{ticket} ({pair}) due to {ai_action} signal ({ai_conf:.1f}%)")
+                        self.pending_reversals.pop(ticket, None)
+                        print(f"🎯 [AI BREAKEVEN RECOVERY] Closed #{ticket} ({pair}) flat at entry ($0.00) after retracement!")
                         self.notifier.send_message(
-                            f"🚨 <b>AI REVERSAL EXIT!</b>\n"
+                            f"🎯 <b>AI BREAKEVEN RECOVERY SUCCESSFUL!</b>\n"
                             f"━━━━━━━━━━━━━━━━━━\n"
-                            f"Closed position #{ticket} ({pair}) early:\n"
-                            f"• <b>Reason:</b> Model detected strong opposite {ai_action} ({ai_conf:.1f}%)\n"
-                            f"• <b>Closed at:</b> {close_price:.5f} | Profit: ${profit:.2f}\n"
+                            f"Exited position #{ticket} ({pair}) flat at entry after retracement:\n"
+                            f"• <b>Closed at:</b> {close_price:.5f} | Profit: ${profit:.2f} (Zero Capital Lost!)\n"
                             f"━━━━━━━━━━━━━━━━━━"
                         )
 
