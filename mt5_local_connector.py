@@ -246,6 +246,147 @@ class RealTime1SecBot:
         actionable = [o for o in opportunities if o.get('confidence_passed', False) and not o.get('is_hallucination', False) and o.get('action') in ('BUY', 'SELL')]
         return opportunities, actionable
 
+    def run_cloud_bot_cycle(self, balance: float, equity: float, stats: dict) -> tuple:
+        """
+        Cloud-Native Execution:
+        1. Gathers live OHLCV bars for all 8 pairs and open positions from MT5.
+        2. Sends payload to Render Cloud Bot (/bot/cycle).
+        3. Cloud Bot runs AI DoubleEnsemble, manages positions, decides new entries.
+        4. Returns (data, True) on success.
+        """
+        market_data = {}
+        for pair in PAIRS:
+            df = self.fetch_pair_candles(pair, count=120)
+            if df is not None and not df.empty:
+                candles = []
+                for _, row in df.iterrows():
+                    candles.append({
+                        "open": float(row['Open']),
+                        "high": float(row['High']),
+                        "low": float(row['Low']),
+                        "close": float(row['Close']),
+                        "volume": float(row.get('Volume', 0.0)),
+                        "time": str(row.name)
+                    })
+                market_data[pair] = candles
+
+        open_pos_list = []
+        positions = mt5.positions_get()
+        if positions:
+            for p in positions:
+                open_pos_list.append({
+                    "ticket": int(p.ticket),
+                    "symbol": str(p.symbol),
+                    "type": int(p.type),
+                    "price_open": float(p.price_open),
+                    "price_current": float(p.price_current),
+                    "sl": float(p.sl),
+                    "tp": float(p.tp),
+                    "profit": float(p.profit),
+                    "volume": float(p.volume)
+                })
+
+        payload = {
+            "timeframe": TIMEFRAME,
+            "market_data": market_data,
+            "open_positions": open_pos_list,
+            "account_balance": balance,
+            "account_equity": equity,
+            "daily_pnl": stats['total_daily_pnl'],
+            "today_trades": stats['total_trades_today'],
+            "max_daily_trades": MAX_DAILY_TRADES,
+            "daily_max_loss": DAILY_MAX_LOSS,
+            "max_concurrent_positions": MAX_CONCURRENT_POSITIONS
+        }
+
+        try:
+            resp = requests.post(f"{self.api_url}/bot/cycle", json=payload, timeout=5)
+            if resp.status_code == 200:
+                data = resp.json()
+                return data, True
+        except Exception:
+            pass
+
+        return None, False
+
+    def execute_cloud_instructions(self, cloud_data: dict):
+        # 1. Close orders (Adaptive Loss Cut & BE Recovery)
+        for cl in cloud_data.get('orders_to_close', []):
+            ticket = cl['ticket']
+            sym = cl['symbol']
+            pos = mt5.positions_get(ticket=ticket)
+            if pos and len(pos) > 0:
+                p = pos[0]
+                close_type = mt5.ORDER_TYPE_SELL if p.type == 0 else mt5.ORDER_TYPE_BUY
+                s_info = mt5.symbol_info(sym)
+                c_price = s_info.bid if p.type == 0 else s_info.ask
+                req = {
+                    "action": mt5.TRADE_ACTION_DEAL,
+                    "position": ticket,
+                    "symbol": sym,
+                    "volume": p.volume,
+                    "type": close_type,
+                    "price": c_price,
+                    "deviation": 20,
+                    "magic": MAGIC_NUMBER,
+                    "comment": cl.get('comment', 'AI-CloudClose')[:31],
+                    "type_time": mt5.ORDER_TIME_GTC,
+                    "type_filling": mt5.ORDER_FILLING_IOC,
+                }
+                c_res = mt5.order_send(req)
+                if c_res and c_res.retcode == mt5.TRADE_RETCODE_DONE:
+                    print(f"🛡️ [CLOUD AI EXIT] Closed #{ticket} ({sym}) | Reason: {cl.get('reason')}")
+
+        # 2. Modify SL/TP (Auto-Guard, Breakeven Lock, Trailing)
+        for mod in cloud_data.get('sl_tp_to_modify', []):
+            ticket = mod['ticket']
+            sym = mod['symbol']
+            pos = mt5.positions_get(ticket=ticket)
+            if pos and len(pos) > 0:
+                p = pos[0]
+                if abs(p.sl - mod['sl']) > 1e-4 or abs(p.tp - mod['tp']) > 1e-4:
+                    req = {
+                        "action": mt5.TRADE_ACTION_SLTP,
+                        "position": ticket,
+                        "symbol": sym,
+                        "sl": mod['sl'],
+                        "tp": mod['tp'],
+                    }
+                    m_res = mt5.order_send(req)
+                    if m_res and m_res.retcode == mt5.TRADE_RETCODE_DONE:
+                        print(f"🔒 [CLOUD AI SL/TP] Modified #{ticket} ({sym}) SL={mod['sl']}, TP={mod['tp']} ({mod.get('reason')})")
+
+        # 3. Open new orders
+        for op in cloud_data.get('orders_to_open', []):
+            sym = op['symbol']
+            act = op['action']
+            lot = op['volume']
+            tick = mt5.symbol_info_tick(sym)
+            s_info = mt5.symbol_info(sym)
+            if not tick or not s_info:
+                continue
+
+            order_type = mt5.ORDER_TYPE_BUY if act == "BUY" else mt5.ORDER_TYPE_SELL
+            price = tick.ask if act == "BUY" else tick.bid
+            req = {
+                "action": mt5.TRADE_ACTION_DEAL,
+                "symbol": sym,
+                "volume": lot,
+                "type": order_type,
+                "price": price,
+                "sl": op['sl'],
+                "tp": op['tp'],
+                "deviation": 20,
+                "magic": MAGIC_NUMBER,
+                "comment": "AI-Cloud-1to2",
+                "type_time": mt5.ORDER_TIME_GTC,
+                "type_filling": mt5.ORDER_FILLING_IOC,
+            }
+            res = mt5.order_send(req)
+            if res and res.retcode == mt5.TRADE_RETCODE_DONE:
+                print(f"⚡ [CLOUD AI ORDER] Placed {act} {lot} lots on {sym} @ {price:.5f} (SL={op['sl']}, TP={op['tp']} | 1:2 RR)")
+                self.daily_trade_count += 1
+
     def execute_trade(self, opp: dict):
         pair = opp['pair']
         action = opp['action']
@@ -596,46 +737,56 @@ class RealTime1SecBot:
                         f"━━━━━━━━━━━━━━━━━━"
                     )
 
-                # Analyze all 8 pairs in local RAM (<400ms) with open_count context
-                opportunities, actionable = self.analyze_market_locally(balance, open_count)
-                compute_time_ms = (time.time() - t0) * 1000
+                # PRIMARY: Run Cloud Bot Cycle on Render
+                cloud_data, is_cloud_ok = self.run_cloud_bot_cycle(balance, equity, stats)
 
-                # Manage all positions (Auto SL/TP for manual trades, Break-Even, AI Reversal Exits)
-                opps_dict = {o['pair']: o for o in opportunities}
-                self.manage_all_positions(opps_dict)
-
-                # Print clean scrolling line every 3 scans (~3 seconds)
-                if scan_count % 3 == 0 or actionable:
-                    top = opportunities[0] if opportunities else {}
-                    act = top.get('action', 'NEUTRAL')
-                    conf = top.get('confidence', 0) * 100
-                    pair_name = top.get('pair', 'None')
+                if is_cloud_ok and cloud_data:
+                    # Execute cloud bot decisions on local MT5
+                    self.execute_cloud_instructions(cloud_data)
+                    compute_time_ms = (time.time() - t0) * 1000
                     ts_str = datetime.datetime.now().strftime('%H:%M:%S')
 
-                    if is_drawdown_limit_hit:
-                        status_tag = f"🛑 PAUSED: Daily Drawdown Limit (-$10.00) Hit! (PnL: ${daily_pnl:+.2f})"
-                    elif today_trades >= MAX_DAILY_TRADES:
-                        status_tag = f"✅ MAX TRADES REACHED ({today_trades}/{MAX_DAILY_TRADES}) | PnL: ${daily_pnl:+.2f}"
-                    elif actionable:
-                        status_tag = f"🎯 ACTIONABLE: {act}"
-                    else:
-                        status_tag = f"Scanning... Best: {pair_name} ({act} {conf:.1f}%) | PnL: ${daily_pnl:+.2f}"
+                    if scan_count % 3 == 0 or len(cloud_data.get('orders_to_open', [])) > 0:
+                        status_summary = cloud_data.get('cycle_summary', 'Cloud Brain Active')
+                        print(f"[{ts_str}] ☁️ [RENDER BOT] Cycle #{scan_count:05d} ({compute_time_ms:.0f}ms) | Equity: ${equity:.2f} | Trades: {today_trades}/{MAX_DAILY_TRADES} (Open: {open_count}) | {status_summary}")
 
-                    print(f"[{ts_str}] ⚡ Scan #{scan_count:05d} | 8 Symbols ({compute_time_ms:.0f}ms) | Equity: ${equity:.2f} | Trades: {today_trades}/{MAX_DAILY_TRADES} (Open: {open_count}) | {status_tag}")
+                else:
+                    # FALLBACK: Local RAM Engine if Render is waking up or network lags
+                    opportunities, actionable = self.analyze_market_locally(balance, open_count)
+                    compute_time_ms = (time.time() - t0) * 1000
 
-                # Execute actionable trades ONLY if daily limits allow
-                can_open_trades = (today_trades < MAX_DAILY_TRADES) and (not is_drawdown_limit_hit) and (open_count < MAX_CONCURRENT_POSITIONS)
+                    opps_dict = {o['pair']: o for o in opportunities}
+                    self.manage_all_positions(opps_dict)
 
-                if actionable and can_open_trades:
-                    for opp in actionable:
-                        pair = opp['pair']
-                        df = self.fetch_pair_candles(pair, count=50)
-                        last_bar_time = int(df['time'].iloc[-1]) if df is not None and 'time' in df.columns else 0
-                        if self.last_traded_bar.get(pair) == last_bar_time:
-                            continue
+                    if scan_count % 3 == 0 or actionable:
+                        top = opportunities[0] if opportunities else {}
+                        act = top.get('action', 'NEUTRAL')
+                        conf = top.get('confidence', 0) * 100
+                        pair_name = top.get('pair', 'None')
+                        ts_str = datetime.datetime.now().strftime('%H:%M:%S')
 
-                        self.execute_trade(opp)
-                        self.last_traded_bar[pair] = last_bar_time
+                        if is_drawdown_limit_hit:
+                            status_tag = f"🛑 PAUSED: Daily Drawdown Limit (-$10.00) Hit! (PnL: ${daily_pnl:+.2f})"
+                        elif today_trades >= MAX_DAILY_TRADES:
+                            status_tag = f"✅ MAX TRADES REACHED ({today_trades}/{MAX_DAILY_TRADES}) | PnL: ${daily_pnl:+.2f}"
+                        elif actionable:
+                            status_tag = f"🎯 ACTIONABLE: {act}"
+                        else:
+                            status_tag = f"Local Fallback... Best: {pair_name} ({act} {conf:.1f}%) | PnL: ${daily_pnl:+.2f}"
+
+                        print(f"[{ts_str}] ⚡ [LOCAL FALLBACK] Scan #{scan_count:05d} ({compute_time_ms:.0f}ms) | Equity: ${equity:.2f} | Trades: {today_trades}/{MAX_DAILY_TRADES} (Open: {open_count}) | {status_tag}")
+
+                    can_open_trades = (today_trades < MAX_DAILY_TRADES) and (not is_drawdown_limit_hit) and (open_count < MAX_CONCURRENT_POSITIONS)
+                    if actionable and can_open_trades:
+                        for opp in actionable:
+                            pair = opp['pair']
+                            df = self.fetch_pair_candles(pair, count=50)
+                            last_bar_time = int(df['time'].iloc[-1]) if df is not None and 'time' in df.columns else 0
+                            if self.last_traded_bar.get(pair) == last_bar_time:
+                                continue
+
+                            self.execute_trade(opp)
+                            self.last_traded_bar[pair] = last_bar_time
 
                 # Target 1.0 second cycle
                 elapsed = time.time() - t0
